@@ -17,33 +17,40 @@ class ArduinoController:
         self.comm_thread = None
         
     def connect(self):
-        """Connect to Arduino with proper delays"""
+        """Connect to Arduino with proper initialization delays"""
         try:
-            print(f"Attempting to connect to Arduino on {self.port}...")
-            self.serial_connection = serial.Serial(self.port, self.baud_rate, timeout=2)
+            print(f"🔌 Attempting Arduino connection on {self.port}...")
+            self.serial_connection = serial.Serial(
+                self.port, 
+                self.baud_rate, 
+                timeout=3,
+                write_timeout=3
+            )
             
-            # Give Arduino more time to initialize
-            print("Waiting for Arduino to initialize...")
-            time.sleep(4)  # Increased delay for Arduino initialization
+            # Critical: Give Arduino time to reset and initialize
+            print("⏳ Waiting for Arduino to reset and initialize...")
+            time.sleep(5)  # Increased Arduino reset delay
             
-            # Clear any initial data
+            # Clear any startup data from Arduino
             if self.serial_connection.in_waiting:
-                self.serial_connection.reset_input_buffer()
+                startup_data = self.serial_connection.read_all()
+                print(f"📥 Arduino startup data: {startup_data.decode('utf-8', errors='ignore')}")
             
             self.connected = True
-            print(f"Successfully connected to Arduino on {self.port}")
+            print(f"✅ Arduino connected successfully on {self.port}")
             
             # Start communication thread
             self.comm_thread = threading.Thread(target=self._communication_loop, daemon=True)
             self.comm_thread.start()
             
-            # Send a test command to verify connection
+            # Send initial status request to verify communication
             time.sleep(1)
             self.command_queue.put("STATUS\n")
             
             return True
-        except Exception as e:
-            print(f"Failed to connect to Arduino: {e}")
+            
+        except serial.SerialException as e:
+            print(f"❌ Serial connection failed: {e}")
             self.connected = False
             if self.serial_connection:
                 try:
@@ -52,42 +59,61 @@ class ArduinoController:
                     pass
                 self.serial_connection = None
             return False
+        except Exception as e:
+            print(f"❌ Unexpected connection error: {e}")
+            self.connected = False
+            return False
     
     def disconnect(self):
-        """Disconnect from Arduino"""
+        """Safely disconnect from Arduino"""
+        print("🔌 Disconnecting from Arduino...")
         self.connected = False
+        
         if self.serial_connection:
             try:
                 # Send stop command before disconnecting
+                print("🛑 Sending STOP command...")
                 self.command_queue.put("STOP\n")
-                time.sleep(1)  # Give time for command to be sent
+                time.sleep(2)  # Give time for command to be processed
+                
                 self.serial_connection.close()
-            except:
-                pass
-            self.serial_connection = None
-        print("Disconnected from Arduino")
+                print("✅ Arduino connection closed")
+            except Exception as e:
+                print(f"⚠️ Error during disconnect: {e}")
+            finally:
+                self.serial_connection = None
+        
+        if self.comm_thread and self.comm_thread.is_alive():
+            self.comm_thread.join(timeout=3)
+            
+        print("✅ Arduino disconnected successfully")
     
     def start_traffic_system(self):
         """Start the traffic control system"""
         if self.connected:
-            print("Starting traffic system...")
+            print("🚦 Starting traffic control system...")
             self.command_queue.put("START\n")
             return True
-        return False
+        else:
+            print("❌ Cannot start: Arduino not connected")
+            return False
     
     def stop_traffic_system(self):
         """Stop the traffic control system"""
         if self.connected:
-            print("Stopping traffic system...")
+            print("🛑 Stopping traffic control system...")
             self.command_queue.put("STOP\n")
             return True
-        return False
+        else:
+            print("❌ Cannot stop: Arduino not connected")
+            return False
     
     def update_road_data(self, road_id: int, vehicle_count: int, has_emergency: bool):
         """Update vehicle count and emergency status for a road"""
         if self.connected:
             command = f"UPDATE:{road_id}:{vehicle_count}:{str(has_emergency).lower()}\n"
             self.command_queue.put(command)
+            print(f"🚗 Updated Road {road_id}: {vehicle_count} vehicles, Emergency: {has_emergency}")
             return True
         return False
     
@@ -100,124 +126,160 @@ class ArduinoController:
     
     def _communication_loop(self):
         """Main communication loop running in separate thread"""
-        print("Arduino communication loop started")
+        print("🔄 Arduino communication loop started")
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        
         while self.connected and self.serial_connection:
             try:
-                # Send commands from queue
+                # Send queued commands
                 if not self.command_queue.empty():
                     command = self.command_queue.get()
                     self.serial_connection.write(command.encode())
-                    print(f"Sent to Arduino: {command.strip()}")
-                    time.sleep(0.2)  # Small delay after sending
+                    print(f"📤 Sent to Arduino: {command.strip()}")
+                    time.sleep(0.3)  # Allow Arduino time to process
                 
-                # Read responses
+                # Read Arduino responses
                 if self.serial_connection.in_waiting:
                     response = self.serial_connection.readline().decode('utf-8').strip()
                     if response:
-                        print(f"Arduino response: {response}")
+                        print(f"📥 Arduino response: {response}")
                         self.response_queue.put(response)
+                        consecutive_errors = 0  # Reset error counter on successful communication
                 
-                time.sleep(0.1)
+                time.sleep(0.1)  # Small delay to prevent CPU overload
+                
+            except serial.SerialException as e:
+                consecutive_errors += 1
+                print(f"🔄 Serial communication error #{consecutive_errors}: {e}")
+                
+                if consecutive_errors >= max_consecutive_errors:
+                    print(f"❌ Too many consecutive errors ({consecutive_errors}), stopping communication")
+                    break
+                    
+                # Try to recover
+                time.sleep(1)
                 
             except Exception as e:
-                print(f"Communication error: {e}")
-                if self.connected:
-                    print("Attempting to reconnect...")
-                    time.sleep(2)
-                    try:
-                        if self.serial_connection:
-                            self.serial_connection.close()
-                        self.connect()
-                    except:
-                        break
-                else:
+                consecutive_errors += 1
+                print(f"🔄 Unexpected communication error #{consecutive_errors}: {e}")
+                
+                if consecutive_errors >= max_consecutive_errors:
+                    print(f"❌ Too many consecutive errors, stopping communication")
                     break
-        print("Arduino communication loop ended")
+                    
+                time.sleep(1)
+        
+        print("🔄 Arduino communication loop ended")
     
     def get_available_ports(self):
-        """Get list of available serial ports"""
+        """Get list of available serial ports for Arduino"""
         try:
             import serial.tools.list_ports
             ports = serial.tools.list_ports.comports()
             available_ports = []
             
+            print("🔍 Scanning for available serial ports...")
+            
             for port in ports:
-                # Filter for likely Arduino ports
                 port_name = port.device
                 port_desc = getattr(port, 'description', '').lower()
+                port_hwid = getattr(port, 'hwid', '').lower()
                 
-                if any(keyword in port_desc for keyword in ['arduino', 'mega', 'usb', 'serial']):
+                print(f"📟 Found port: {port_name} - {port.description}")
+                
+                # Look for Arduino-specific identifiers
+                arduino_keywords = ['arduino', 'mega', 'uno', 'ch340', 'ch341', 'ftdi', 'usb serial']
+                
+                if any(keyword in port_desc for keyword in arduino_keywords) or \
+                   any(keyword in port_hwid for keyword in arduino_keywords):
                     available_ports.append(port_name)
+                    print(f"✅ Arduino-compatible port detected: {port_name}")
                 elif port_name.startswith(('COM', '/dev/ttyUSB', '/dev/ttyACM')):
                     available_ports.append(port_name)
+                    print(f"📟 Generic serial port added: {port_name}")
             
+            print(f"📋 Total available ports: {available_ports}")
             return available_ports
+            
         except Exception as e:
-            print(f"Error getting ports: {e}")
+            print(f"❌ Error scanning ports: {e}")
             return []
 
 # Global Arduino controller instance
 arduino_controller = ArduinoController()
 
 def initialize_arduino(port: str = None):
-    """Initialize Arduino connection with auto-detection if port not specified"""
+    """Initialize Arduino connection with enhanced port detection"""
     global arduino_controller
     
-    print("Initializing Arduino connection...")
+    print("\n" + "="*50)
+    print("🔌 INITIALIZING ARDUINO CONNECTION")
+    print("="*50)
     
     if port:
         arduino_controller.port = port
-        print(f"Using specified port: {port}")
+        print(f"🎯 Using specified port: {port}")
     else:
-        # Try to auto-detect Arduino
+        # Enhanced auto-detection
         available_ports = arduino_controller.get_available_ports()
-        print(f"Available ports: {available_ports}")
         
         if not available_ports:
-            print("No suitable ports found")
+            print("❌ No suitable Arduino ports found!")
+            print("💡 Make sure Arduino is connected via USB")
             return False
         
-        # Common Arduino ports (prioritized)
-        common_ports = ['COM3', 'COM4', 'COM5', '/dev/ttyUSB0', '/dev/ttyACM0', '/dev/ttyUSB1', '/dev/ttyACM1']
+        # Prioritize common Arduino ports
+        priority_ports = ['COM3', 'COM4', 'COM5', '/dev/ttyUSB0', '/dev/ttyACM0']
         
-        # Try common ports first if they're available
-        for test_port in common_ports:
-            if test_port in available_ports:
-                arduino_controller.port = test_port
-                print(f"Auto-selected port: {test_port}")
+        selected_port = None
+        for priority_port in priority_ports:
+            if priority_port in available_ports:
+                selected_port = priority_port
                 break
-        else:
-            # Use first available port
-            arduino_controller.port = available_ports[0]
-            print(f"Using first available port: {available_ports[0]}")
+        
+        if not selected_port:
+            selected_port = available_ports[0]
+        
+        arduino_controller.port = selected_port
+        print(f"🎯 Auto-selected port: {selected_port}")
     
+    # Attempt connection
     success = arduino_controller.connect()
-    if success:
-        print("Arduino initialization successful")
-    else:
-        print("Arduino initialization failed")
     
+    if success:
+        print("✅ ARDUINO INITIALIZATION SUCCESSFUL!")
+        print("🚦 Ready for traffic control commands")
+    else:
+        print("❌ ARDUINO INITIALIZATION FAILED!")
+        print("💡 Check Arduino connection and try different port")
+    
+    print("="*50 + "\n")
     return success
 
 def send_traffic_data(road_data: List[Dict]):
-    """Send traffic data to Arduino"""
+    """Send traffic data to Arduino with enhanced logging"""
     global arduino_controller
     
     if not arduino_controller.connected:
-        print("Arduino not connected, cannot send traffic data")
+        print("❌ Cannot send traffic data: Arduino not connected")
         return False
     
     try:
+        print("🚗 Sending traffic data to Arduino...")
+        
         for road in road_data:
             road_id = road.get('id', 1)
             vehicle_count = len(road.get('detections', []))
             has_emergency = road.get('hasEmergencyVehicle', False)
             
             success = arduino_controller.update_road_data(road_id, vehicle_count, has_emergency)
-            if success:
-                print(f"Sent traffic data for road {road_id}: {vehicle_count} vehicles, emergency: {has_emergency}")
+            if not success:
+                print(f"⚠️ Failed to send data for road {road_id}")
         
+        print("✅ Traffic data sent successfully")
         return True
+        
     except Exception as e:
-        print(f"Error sending traffic data: {e}")
+        print(f"❌ Error sending traffic data: {e}")
         return False

@@ -1,10 +1,11 @@
+
 import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Microchip, Wifi, WifiOff, Play, Square, Settings, Zap, AlertTriangle } from "lucide-react";
+import { Microchip, Wifi, WifiOff, Play, Square, Settings, Zap, AlertTriangle, Server, Terminal } from "lucide-react";
 
 interface ArduinoControllerProps {
   onConnectionChange: (connected: boolean) => void;
@@ -19,50 +20,60 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
   const [availablePorts, setAvailablePorts] = useState<string[]>([]);
   const [systemActive, setSystemActive] = useState(false);
   const [error, setError] = useState("");
-  const [isLoading, setIsLoading] = useState(true);
   const [backendReady, setBackendReady] = useState(false);
+  const [backendChecking, setBackendChecking] = useState(true);
 
   useEffect(() => {
-    // Wait longer before first check to allow backend to start
-    const initialDelay = setTimeout(() => {
-      checkBackendHealth();
-    }, 3000);
-
-    return () => clearTimeout(initialDelay);
+    // Check backend immediately and then every 3 seconds
+    checkBackendHealth();
+    const interval = setInterval(checkBackendHealth, 3000);
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
+    // Only check Arduino status when backend is ready
     if (backendReady) {
       checkArduinoStatus();
-      const interval = setInterval(checkArduinoStatus, 8000); // Increased interval
+      const interval = setInterval(checkArduinoStatus, 5000);
       return () => clearInterval(interval);
     }
   }, [backendReady]);
 
   const checkBackendHealth = async () => {
     try {
-      setIsLoading(true);
-      console.log("Checking backend health...");
+      setBackendChecking(true);
+      console.log("Checking if Python backend is running...");
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
       
       const response = await fetch(`${API_BASE_URL}/health`, {
-        signal: AbortSignal.timeout(5000)
+        signal: controller.signal,
+        mode: 'cors'
       });
       
-      if (!response.ok) throw new Error('Backend not ready');
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        throw new Error(`Backend returned ${response.status}`);
+      }
       
       const data = await response.json();
-      console.log("Backend health check passed:", data);
+      console.log("✅ Python backend is running successfully!");
       setBackendReady(true);
       setError("");
-    } catch (err) {
-      console.error("Backend not ready:", err);
-      setBackendReady(false);
-      setError("Backend service is starting up... Please wait");
       
-      // Retry after delay
-      setTimeout(checkBackendHealth, 5000);
+    } catch (err) {
+      console.error("❌ Python backend not accessible:", err);
+      setBackendReady(false);
+      
+      if (err instanceof Error && err.name === 'AbortError') {
+        setError("🔄 Checking for Python server... Make sure to run the backend first!");
+      } else {
+        setError("⚠️ Python backend server is not running. Please start it first!");
+      }
     } finally {
-      setIsLoading(false);
+      setBackendChecking(false);
     }
   };
 
@@ -70,36 +81,30 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
     if (!backendReady) return;
     
     try {
-      console.log("Checking Arduino status...");
+      console.log("Checking Arduino connection status...");
       const response = await fetch(`${API_BASE_URL}/arduino/status`, {
-        signal: AbortSignal.timeout(5000)
+        signal: AbortSignal.timeout(3000)
       });
       
       if (!response.ok) throw new Error('Arduino status check failed');
       
       const data = await response.json();
-      console.log("Arduino status:", data);
+      console.log("Arduino status received:", data);
       
       setIsConnected(data.connected);
-      setAvailablePorts((data.available_ports || []).filter(port => port && port.trim() !== ''));
+      setAvailablePorts(data.available_ports || []);
       onConnectionChange(data.connected);
       
-      if (error && !error.includes("Backend service")) {
-        setError("");
-      }
     } catch (err) {
-      console.error("Failed to check Arduino status:", err);
+      console.error("Failed to get Arduino status:", err);
       setIsConnected(false);
       onConnectionChange(false);
-      if (backendReady) {
-        setError("Failed to communicate with Arduino controller");
-      }
     }
   };
 
   const connectArduino = async () => {
     if (!backendReady) {
-      setError("Backend service is not ready yet. Please wait...");
+      setError("❌ Cannot connect Arduino: Python backend is not running!");
       return;
     }
 
@@ -107,37 +112,40 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
     setError("");
     
     try {
-      console.log("Attempting to connect Arduino on port:", selectedPort);
+      console.log("🔌 Connecting to Arduino on port:", selectedPort);
       
       const response = await fetch(`${API_BASE_URL}/arduino/connect`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           port: selectedPort === "auto" ? null : selectedPort
         }),
-        signal: AbortSignal.timeout(10000) // Increased timeout for connection
+        signal: AbortSignal.timeout(15000)
       });
 
       const data = await response.json();
       console.log("Arduino connection response:", data);
       
-      if (!response.ok) throw new Error(data.message || "Failed to connect to Arduino");
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to connect to Arduino");
+      }
       
-      // Wait a bit for Arduino to initialize
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Wait for Arduino to fully initialize
+      console.log("⏳ Waiting for Arduino to initialize...");
+      await new Promise(resolve => setTimeout(resolve, 3000));
       
       setIsConnected(true);
       onConnectionChange(true);
       setError("");
+      console.log("✅ Arduino connected successfully!");
       
-      // Refresh status after connection
+      // Refresh status
       setTimeout(checkArduinoStatus, 1000);
+      
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "Failed to connect to Arduino";
-      setError(errorMsg);
-      console.error("Arduino connection error:", err);
+      setError(`❌ ${errorMsg}`);
+      console.error("Arduino connection failed:", err);
     } finally {
       setIsConnecting(false);
     }
@@ -145,7 +153,7 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
 
   const disconnectArduino = async () => {
     try {
-      console.log("Disconnecting Arduino...");
+      console.log("🔌 Disconnecting Arduino...");
       const response = await fetch(`${API_BASE_URL}/arduino/disconnect`, {
         method: 'POST',
         signal: AbortSignal.timeout(5000)
@@ -153,21 +161,22 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
 
       const data = await response.json();
       
-      if (!response.ok) throw new Error(data.message || "Failed to disconnect from Arduino");
+      if (!response.ok) throw new Error(data.message || "Failed to disconnect");
       
       setIsConnected(false);
       setSystemActive(false);
       onConnectionChange(false);
       setError("");
+      console.log("✅ Arduino disconnected");
+      
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to disconnect from Arduino");
-      console.error("Arduino disconnection error:", err);
+      setError(`❌ Disconnect failed: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
   };
 
   const startTrafficSystem = async () => {
     try {
-      console.log("Starting traffic system...");
+      console.log("🚦 Starting traffic control system...");
       const response = await fetch(`${API_BASE_URL}/arduino/start`, {
         method: 'POST',
         signal: AbortSignal.timeout(5000)
@@ -179,15 +188,16 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
       
       setSystemActive(true);
       setError("");
+      console.log("✅ Traffic system started!");
+      
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start traffic system");
-      console.error("Traffic system start error:", err);
+      setError(`❌ Start failed: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
   };
 
   const stopTrafficSystem = async () => {
     try {
-      console.log("Stopping traffic system...");
+      console.log("🛑 Stopping traffic control system...");
       const response = await fetch(`${API_BASE_URL}/arduino/stop`, {
         method: 'POST',
         signal: AbortSignal.timeout(5000)
@@ -199,19 +209,47 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
       
       setSystemActive(false);
       setError("");
+      console.log("✅ Traffic system stopped!");
+      
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to stop traffic system");
-      console.error("Traffic system stop error:", err);
+      setError(`❌ Stop failed: ${err instanceof Error ? err.message : "Unknown error"}`);
     }
   };
 
-  const handleRetry = () => {
-    setError("");
-    if (!backendReady) {
-      checkBackendHealth();
-    } else {
-      checkArduinoStatus();
+  const getBackendStatusBadge = () => {
+    if (backendChecking) {
+      return (
+        <Badge variant="secondary" className="bg-yellow-600 text-white animate-pulse">
+          <Terminal className="h-3 w-3 mr-1" />
+          Checking...
+        </Badge>
+      );
     }
+    
+    if (!backendReady) {
+      return (
+        <Badge variant="secondary" className="bg-red-600 text-white">
+          <Server className="h-3 w-3 mr-1" />
+          Backend Down
+        </Badge>
+      );
+    }
+    
+    if (isConnected) {
+      return (
+        <Badge variant="secondary" className="bg-green-600 text-white">
+          <Wifi className="h-3 w-3 mr-1" />
+          Arduino Connected
+        </Badge>
+      );
+    }
+    
+    return (
+      <Badge variant="secondary" className="bg-blue-600 text-white">
+        <WifiOff className="h-3 w-3 mr-1" />
+        Ready to Connect
+      </Badge>
+    );
   };
 
   return (
@@ -220,55 +258,64 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
         <CardTitle className="text-white flex items-center">
           <Microchip className="h-5 w-5 mr-2" />
           Arduino Traffic Controller
-          <Badge 
-            variant="secondary" 
-            className={`ml-2 ${isConnected ? 'bg-green-600' : backendReady ? 'bg-yellow-600' : 'bg-red-600'} text-white`}
-          >
-            {isConnected ? (
-              <>
-                <Wifi className="h-3 w-3 mr-1" />
-                Connected
-              </>
-            ) : (
-              <>
-                <WifiOff className="h-3 w-3 mr-1" />
-                {backendReady ? 'Ready' : 'Starting...'}
-              </>
-            )}
-          </Badge>
+          {getBackendStatusBadge()}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        {error && (
+        {/* Backend Status Alert */}
+        {!backendReady && (
           <Alert className="bg-red-900/50 border-red-500">
-            <div className="flex items-center justify-between">
-              <AlertDescription className="text-white flex items-center">
+            <AlertDescription className="text-white">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center">
+                  <AlertTriangle className="h-4 w-4 mr-2" />
+                  <div>
+                    <div className="font-semibold">Python Backend Not Running</div>
+                    <div className="text-sm mt-1">
+                      1. Open terminal in backend folder<br/>
+                      2. Run: <code className="bg-black/30 px-1 rounded">python run.py</code><br/>
+                      3. Wait for "Backend ready for connections" message
+                    </div>
+                  </div>
+                </div>
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  className="text-white hover:bg-white/10"
+                  onClick={checkBackendHealth}
+                  disabled={backendChecking}
+                >
+                  {backendChecking ? "Checking..." : "Retry"}
+                </Button>
+              </div>
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* Connection Error */}
+        {error && backendReady && (
+          <Alert className="bg-red-900/50 border-red-500">
+            <AlertDescription className="text-white flex items-center justify-between">
+              <div className="flex items-center">
                 <AlertTriangle className="h-4 w-4 mr-2" />
                 {error}
-              </AlertDescription>
+              </div>
               <Button 
                 variant="ghost" 
                 size="sm" 
                 className="text-white hover:bg-white/10"
-                onClick={handleRetry}
+                onClick={checkArduinoStatus}
               >
                 Retry
               </Button>
-            </div>
+            </AlertDescription>
           </Alert>
         )}
 
-        {isLoading || !backendReady ? (
-          <div className="flex flex-col items-center justify-center py-4 space-y-2">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
-            <p className="text-white text-sm">
-              {!backendReady ? "Waiting for backend service..." : "Loading..."}
-            </p>
-          </div>
-        ) : !isConnected ? (
+        {backendReady && !isConnected ? (
           <div className="space-y-3">
             <div>
-              <label className="text-white text-sm mb-2 block">Serial Port:</label>
+              <label className="text-white text-sm mb-2 block">Arduino Serial Port:</label>
               <Select 
                 value={selectedPort} 
                 onValueChange={setSelectedPort}
@@ -278,14 +325,14 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
                   <SelectValue placeholder="Select Arduino port" />
                 </SelectTrigger>
                 <SelectContent className="bg-gray-800 text-white border-white/20">
-                  <SelectItem value="auto">Auto-detect</SelectItem>
+                  <SelectItem value="auto">🔍 Auto-detect Arduino</SelectItem>
                   {availablePorts.map((port) => (
                     <SelectItem 
                       key={port} 
                       value={port}
                       className="hover:bg-gray-700"
                     >
-                      {port}
+                      📟 {port}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -293,12 +340,13 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
             </div>
             <Button 
               onClick={connectArduino} 
-              disabled={isConnecting || !backendReady}
+              disabled={isConnecting}
               className="w-full bg-green-600 hover:bg-green-700"
             >
               {isConnecting ? (
                 <>
-                  <span className="animate-pulse">Connecting...</span>
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                  Connecting to Arduino...
                 </>
               ) : (
                 <>
@@ -308,21 +356,23 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
               )}
             </Button>
           </div>
-        ) : (
+        ) : backendReady && isConnected ? (
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-white text-sm">Hardware Status:</span>
-              <Badge className="bg-green-600 text-white">
-                <Zap className="h-3 w-3 mr-1" />
-                Ready
-              </Badge>
-            </div>
-            
-            <div className="flex items-center justify-between">
-              <span className="text-white text-sm">Traffic System:</span>
-              <Badge className={systemActive ? "bg-green-600 text-white" : "bg-gray-600 text-white"}>
-                {systemActive ? "Active" : "Stopped"}
-              </Badge>
+            <div className="grid grid-cols-2 gap-4 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-white">Hardware:</span>
+                <Badge className="bg-green-600 text-white">
+                  <Zap className="h-3 w-3 mr-1" />
+                  Connected
+                </Badge>
+              </div>
+              
+              <div className="flex items-center justify-between">
+                <span className="text-white">Traffic System:</span>
+                <Badge className={systemActive ? "bg-green-600 text-white" : "bg-gray-600 text-white"}>
+                  {systemActive ? "🟢 Active" : "🔴 Stopped"}
+                </Badge>
+              </div>
             </div>
 
             <div className="flex gap-2">
@@ -353,14 +403,16 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
               </Button>
             </div>
           </div>
-        )}
+        ) : null}
 
-        <div className="text-xs text-purple-200 space-y-1">
-          <p>• Connect Arduino Mega via USB</p>
-          <p>• Upload traffic_controller.ino to Arduino</p>
-          <p>• Start Python backend server first</p>
-          <p>• Traffic lights controlled automatically</p>
-          <p>• Emergency vehicles get priority override</p>
+        {/* Instructions */}
+        <div className="text-xs text-purple-200 space-y-1 border-t border-white/10 pt-3">
+          <p><strong>Setup Steps:</strong></p>
+          <p>1. 🔌 Connect Arduino Mega to computer via USB</p>
+          <p>2. 📤 Upload traffic_controller.ino to Arduino IDE</p>
+          <p>3. 🐍 Start Python backend: <code>python run.py</code></p>
+          <p>4. 🌐 Connect Arduino through this interface</p>
+          <p>5. 🚦 Start traffic system for automatic control</p>
         </div>
       </CardContent>
     </Card>
