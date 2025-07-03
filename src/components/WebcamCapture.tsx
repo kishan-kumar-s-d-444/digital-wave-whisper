@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useCallback } from "react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
@@ -20,11 +20,18 @@ interface WebcamCaptureProps {
   onDetectionUpdate: (predictions: Detection[]) => void;
   onStatusChange: (isActive: boolean) => void;
   cameraId?: number;
+  deviceId?: string;
 }
 
 const API_BASE_URL = "http://localhost:8000";
 
-export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStatusChange, cameraId = 1 }: WebcamCaptureProps) => {
+export const WebcamCapture = ({ 
+  globalDetectionActive, 
+  onDetectionUpdate, 
+  onStatusChange, 
+  cameraId = 1,
+  deviceId: propDeviceId = ""
+}: WebcamCaptureProps) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -42,7 +49,14 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
 
   const [recentDetections, setRecentDetections] = useState<{ detection: Detection; timestamp: number }[]>([]);
   const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
-  const [selectedCameraId, setSelectedCameraId] = useState<string>("");
+  const [selectedCameraId, setSelectedCameraId] = useState<string>(propDeviceId);
+
+  // Sync prop changes to state
+  useEffect(() => {
+    if (propDeviceId && propDeviceId !== selectedCameraId) {
+      setSelectedCameraId(propDeviceId);
+    }
+  }, [propDeviceId]);
 
   // Handle global detection state changes
   useEffect(() => {
@@ -57,13 +71,15 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
   useEffect(() => {
     const getCameras = async () => {
       try {
+        await navigator.mediaDevices.getUserMedia({ video: true });
         const devices = await navigator.mediaDevices.enumerateDevices();
         const videoDevices = devices.filter(device => device.kind === 'videoinput');
         setAvailableCameras(videoDevices);
         
-        // Set default camera based on cameraId prop
         if (videoDevices.length > 0) {
-          const defaultCamera = videoDevices[Math.min(cameraId - 1, videoDevices.length - 1)];
+          const defaultCamera = propDeviceId 
+            ? videoDevices.find(device => device.deviceId === propDeviceId) || videoDevices[0]
+            : videoDevices[Math.min(cameraId - 1, videoDevices.length - 1)];
           setSelectedCameraId(defaultCamera.deviceId);
         }
       } catch (err) {
@@ -73,7 +89,7 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
     };
 
     getCameras();
-  }, [cameraId]);
+  }, [cameraId, propDeviceId]);
 
   const checkApiConnection = async () => {
     setIsCheckingApi(true);
@@ -113,7 +129,7 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
     try {
       const constraints = {
         video: {
-          deviceId: selectedCameraId ? { exact: selectedCameraId } : undefined,
+          deviceId: { exact: selectedCameraId },
           width: { ideal: 640 },
           height: { ideal: 480 },
           frameRate: { ideal: 30 }
@@ -159,11 +175,9 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
   const handleCameraChange = (deviceId: string) => {
     setSelectedCameraId(deviceId);
     
-    // If currently streaming, restart with new camera
     if (isStreaming) {
       stopWebcam();
       setTimeout(() => {
-        setSelectedCameraId(deviceId);
         if (globalDetectionActive) {
           startWebcam();
         }
@@ -209,7 +223,7 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
       if (result.success && result.predictions) {
         const updatedDetections = [...recentDetections];
 
-        result.predictions.forEach((pred) => {
+        result.predictions.forEach((pred: Detection) => {
           const existing = updatedDetections.find(
             (item) =>
               item.detection.class === pred.class &&
@@ -226,7 +240,6 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
         });
 
         const filtered = updatedDetections.filter(item => now - item.timestamp <= 10000);
-
         setRecentDetections(filtered);
         onDetectionUpdate(filtered.map(d => d.detection));
         setProcessingTime(result.processing_time || 0);
@@ -242,7 +255,7 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
     }
   };
 
-  const drawDetections = (
+  const drawDetections = useCallback((
     ctx: CanvasRenderingContext2D,
     predictions: Detection[],
     width: number,
@@ -280,7 +293,7 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
     });
 
     ctx.globalAlpha = 1.0;
-  };
+  }, [labelDisplayMode, opacityThreshold]);
 
   // Continuous drawing loop
   useEffect(() => {
@@ -308,7 +321,7 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
 
     animationFrameId = requestAnimationFrame(renderLoop);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [recentDetections, labelDisplayMode, opacityThreshold]);
+  }, [recentDetections, drawDetections]);
 
   useEffect(() => {
     checkApiConnection();
@@ -331,7 +344,6 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
         </Alert>
       )}
 
-      {/* Camera Selection */}
       <Card className="bg-black/40 backdrop-blur-md border-white/20">
         <CardHeader>
           <CardTitle className="text-white flex items-center">
@@ -342,7 +354,11 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
         <CardContent>
           <div>
             <label className="text-white text-sm mb-2 block">Select Camera:</label>
-            <Select value={selectedCameraId} onValueChange={handleCameraChange}>
+            <Select 
+              value={selectedCameraId} 
+              onValueChange={handleCameraChange}
+              disabled={isStreaming}
+            >
               <SelectTrigger className="bg-white/10 border-white/20 text-white">
                 <SelectValue placeholder="Choose a camera..." />
               </SelectTrigger>
@@ -370,19 +386,37 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
             <label className="text-white text-sm mb-2 block">
               Confidence Threshold: {Math.round(confidenceThreshold * 100)}%
             </label>
-            <Slider value={[confidenceThreshold]} onValueChange={(value) => setConfidenceThreshold(value[0])} min={0} max={1} step={0.01} />
+            <Slider 
+              value={[confidenceThreshold]} 
+              onValueChange={(value) => setConfidenceThreshold(value[0])} 
+              min={0} 
+              max={1} 
+              step={0.01} 
+            />
           </div>
           <div>
             <label className="text-white text-sm mb-2 block">
               Overlap Threshold: {Math.round(overlapThreshold * 100)}%
             </label>
-            <Slider value={[overlapThreshold]} onValueChange={(value) => setOverlapThreshold(value[0])} min={0} max={1} step={0.01} />
+            <Slider 
+              value={[overlapThreshold]} 
+              onValueChange={(value) => setOverlapThreshold(value[0])} 
+              min={0} 
+              max={1} 
+              step={0.01} 
+            />
           </div>
           <div>
             <label className="text-white text-sm mb-2 block">
               Opacity Threshold: {Math.round(opacityThreshold * 100)}%
             </label>
-            <Slider value={[opacityThreshold]} onValueChange={(value) => setOpacityThreshold(value[0])} min={0} max={1} step={0.01} />
+            <Slider 
+              value={[opacityThreshold]} 
+              onValueChange={(value) => setOpacityThreshold(value[0])} 
+              min={0} 
+              max={1} 
+              step={0.01} 
+            />
           </div>
           <div>
             <label className="text-white text-sm mb-2 block">Label Display Mode:</label>
@@ -420,7 +454,11 @@ export const WebcamCapture = ({ globalDetectionActive, onDetectionUpdate, onStat
 
       <div className="flex gap-2">
         {!isStreaming ? (
-          <Button onClick={startWebcam} className="bg-green-600 hover:bg-green-700" disabled={!apiConnected || !selectedCameraId}>
+          <Button 
+            onClick={startWebcam} 
+            className="bg-green-600 hover:bg-green-700" 
+            disabled={!apiConnected || !selectedCameraId}
+          >
             <Play className="h-4 w-4 mr-2" />
             Start Detection
           </Button>
