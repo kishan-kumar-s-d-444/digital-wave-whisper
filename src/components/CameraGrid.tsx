@@ -1,8 +1,10 @@
-import { useState } from "react";
+
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { WebcamCapture } from "./WebcamCapture";
+import { ArduinoController } from "./ArduinoController";
 import { Maximize, Minimize, Camera, Grid3X3, Monitor, Play, Square, AlertTriangle } from "lucide-react";
 
 interface Detection {
@@ -23,16 +25,48 @@ interface CameraData {
   hasEmergencyVehicle: boolean;
 }
 
+const API_BASE_URL = "http://localhost:8000";
+
 export const CameraGrid = () => {
   const [viewMode, setViewMode] = useState<'grid' | 'single'>('grid');
   const [fullscreenCamera, setFullscreenCamera] = useState<number | null>(null);
   const [globalDetectionActive, setGlobalDetectionActive] = useState(false);
+  const [arduinoConnected, setArduinoConnected] = useState(false);
   const [cameras, setCameras] = useState<CameraData[]>([
     { id: 1, name: 'Lane 1 - North', isActive: false, detections: [], trafficCount: 0, hasEmergencyVehicle: false },
     { id: 2, name: 'Lane 2 - South', isActive: false, detections: [], trafficCount: 0, hasEmergencyVehicle: false },
     { id: 3, name: 'Lane 3 - East', isActive: false, detections: [], trafficCount: 0, hasEmergencyVehicle: false },
     { id: 4, name: 'Lane 4 - West', isActive: false, detections: [], trafficCount: 0, hasEmergencyVehicle: false },
   ]);
+
+  // Send traffic data to Arduino every 2 seconds when connected
+  useEffect(() => {
+    if (arduinoConnected && globalDetectionActive) {
+      const interval = setInterval(sendTrafficDataToArduino, 2000);
+      return () => clearInterval(interval);
+    }
+  }, [arduinoConnected, globalDetectionActive, cameras]);
+
+  const sendTrafficDataToArduino = async () => {
+    try {
+      const roadData = cameras.map(camera => ({
+        id: camera.id,
+        detections: camera.detections,
+        hasEmergencyVehicle: camera.hasEmergencyVehicle,
+        isActive: camera.isActive
+      }));
+
+      await fetch(`${API_BASE_URL}/arduino/update_traffic`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ road_data: roadData }),
+      });
+    } catch (error) {
+      console.error('Failed to send traffic data to Arduino:', error);
+    }
+  };
 
   const handleDetectionUpdate = (cameraId: number, predictions: Detection[]) => {
     setCameras(prev => prev.map(camera => {
@@ -138,6 +172,9 @@ export const CameraGrid = () => {
 
   return (
     <div className="space-y-4">
+      {/* Arduino Controller */}
+      <ArduinoController onConnectionChange={setArduinoConnected} />
+
       {/* Control Panel */}
       <Card className="bg-black/40 backdrop-blur-md border-white/20">
         <CardHeader>
@@ -145,6 +182,11 @@ export const CameraGrid = () => {
             <div className="flex items-center">
               <Monitor className="h-5 w-5 mr-2" />
               Traffic Management Control Panel
+              {arduinoConnected && (
+                <Badge className="ml-2 bg-green-600 text-white">
+                  Hardware Connected
+                </Badge>
+              )}
             </div>
             <div className="flex gap-2">
               <Button
@@ -183,6 +225,9 @@ export const CameraGrid = () => {
               ) : (
                 <span>All Cameras Stopped - Ready to Start Traffic Management</span>
               )}
+              {arduinoConnected && (
+                <div className="text-green-400">🔌 Arduino hardware controlling physical traffic lights</div>
+              )}
             </div>
             <div className="flex items-center gap-4">
               <Badge variant="secondary" className="bg-purple-600 text-white">
@@ -217,7 +262,9 @@ export const CameraGrid = () => {
       {/* Traffic Signal Status */}
       <Card className="bg-black/40 backdrop-blur-md border-white/20">
         <CardHeader>
-          <CardTitle className="text-white text-sm">Traffic Light Status (Real-time Signal Control)</CardTitle>
+          <CardTitle className="text-white text-sm">
+            Traffic Light Status {arduinoConnected ? "(Hardware Controlled)" : "(Software Simulation)"}
+          </CardTitle>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-4 gap-4">

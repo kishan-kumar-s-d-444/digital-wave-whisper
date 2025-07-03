@@ -1,13 +1,15 @@
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import List
+from typing import List, Dict, Optional
 import base64
 import requests
 import time
+from arduino_controller import arduino_controller, initialize_arduino, send_traffic_data
 
-app = FastAPI(title="Vehicle Detection API")
+app = FastAPI(title="Vehicle Detection API with Arduino Integration")
 
 # CORS setup
 app.add_middleware(
@@ -42,6 +44,12 @@ class DetectionResponse(BaseModel):
     detections: List[Detection]
     total_detections: int
     processing_time: float
+
+class ArduinoConnectionRequest(BaseModel):
+    port: Optional[str] = None
+
+class TrafficDataRequest(BaseModel):
+    road_data: List[Dict]
 
 @app.post("/detect", response_model=DetectionResponse)
 async def detect_objects(
@@ -148,10 +156,90 @@ async def detect_frame(frame_data: dict):
     except Exception as e:
         return {"success": False, "predictions": [], "error": str(e)}
 
+# Arduino Integration Endpoints
+@app.post("/arduino/connect")
+async def connect_arduino(request: ArduinoConnectionRequest):
+    """Connect to Arduino controller"""
+    try:
+        success = initialize_arduino(request.port)
+        if success:
+            return {"success": True, "message": "Arduino connected successfully"}
+        else:
+            return {"success": False, "message": "Failed to connect to Arduino"}
+    except Exception as e:
+        return {"success": False, "message": f"Arduino connection error: {str(e)}"}
+
+@app.post("/arduino/disconnect")
+async def disconnect_arduino():
+    """Disconnect from Arduino controller"""
+    try:
+        arduino_controller.disconnect()
+        return {"success": True, "message": "Arduino disconnected"}
+    except Exception as e:
+        return {"success": False, "message": f"Arduino disconnection error: {str(e)}"}
+
+@app.post("/arduino/start")
+async def start_traffic_system():
+    """Start the Arduino traffic control system"""
+    try:
+        success = arduino_controller.start_traffic_system()
+        if success:
+            return {"success": True, "message": "Traffic system started"}
+        else:
+            return {"success": False, "message": "Failed to start traffic system"}
+    except Exception as e:
+        return {"success": False, "message": f"Start system error: {str(e)}"}
+
+@app.post("/arduino/stop")
+async def stop_traffic_system():
+    """Stop the Arduino traffic control system"""
+    try:
+        success = arduino_controller.stop_traffic_system()
+        if success:
+            return {"success": True, "message": "Traffic system stopped"}
+        else:
+            return {"success": False, "message": "Failed to stop traffic system"}
+    except Exception as e:
+        return {"success": False, "message": f"Stop system error: {str(e)}"}
+
+@app.post("/arduino/update_traffic")
+async def update_traffic_data(request: TrafficDataRequest):
+    """Send traffic data to Arduino"""
+    try:
+        success = send_traffic_data(request.road_data)
+        if success:
+            return {"success": True, "message": "Traffic data sent to Arduino"}
+        else:
+            return {"success": False, "message": "Failed to send traffic data"}
+    except Exception as e:
+        return {"success": False, "message": f"Traffic data error: {str(e)}"}
+
+@app.get("/arduino/status")
+async def get_arduino_status():
+    """Get Arduino connection and system status"""
+    try:
+        return {
+            "connected": arduino_controller.connected,
+            "port": arduino_controller.port,
+            "available_ports": arduino_controller.get_available_ports()
+        }
+    except Exception as e:
+        return {"success": False, "message": f"Status error: {str(e)}"}
+
 @app.get("/")
 async def root():
-    return {"message": "Vehicle Detection API is running"}
+    return {"message": "Vehicle Detection API with Arduino Integration is running"}
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "model": MODEL_ENDPOINT}
+    return {
+        "status": "healthy", 
+        "model": MODEL_ENDPOINT,
+        "arduino_connected": arduino_controller.connected
+    }
+
+@app.on_event("startup")
+async def startup_event():
+    """Try to connect to Arduino on startup"""
+    print("Attempting to connect to Arduino...")
+    initialize_arduino()
