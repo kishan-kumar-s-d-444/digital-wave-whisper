@@ -7,6 +7,7 @@ from typing import List, Dict, Optional
 import base64
 import requests
 import time
+import asyncio
 from arduino_controller import arduino_controller, initialize_arduino, send_traffic_data
 
 app = FastAPI(title="Vehicle Detection API with Arduino Integration")
@@ -25,6 +26,10 @@ ROBOFLOW_API_KEY = "qDrma4OYH0YLt5Wh8iEp"
 MODEL_ENDPOINT = "toy-vehicle-detection-te7wp/3"
 ROBOFLOW_URL = f"https://detect.roboflow.com/{MODEL_ENDPOINT}"
 
+# Startup flag
+startup_complete = False
+
+# ... keep existing code (model classes and detection endpoints)
 class DetectionParameters(BaseModel):
     confidence_threshold: float = 0.5
     overlap_threshold: float = 0.5
@@ -161,12 +166,17 @@ async def detect_frame(frame_data: dict):
 async def connect_arduino(request: ArduinoConnectionRequest):
     """Connect to Arduino controller"""
     try:
+        if not startup_complete:
+            return {"success": False, "message": "Backend is still starting up, please wait..."}
+        
+        print(f"Connection request for port: {request.port}")
         success = initialize_arduino(request.port)
         if success:
             return {"success": True, "message": "Arduino connected successfully"}
         else:
-            return {"success": False, "message": "Failed to connect to Arduino"}
+            return {"success": False, "message": "Failed to connect to Arduino. Check if Arduino is connected and running the traffic_controller.ino sketch."}
     except Exception as e:
+        print(f"Arduino connection error: {e}")
         return {"success": False, "message": f"Arduino connection error: {str(e)}"}
 
 @app.post("/arduino/disconnect")
@@ -186,7 +196,7 @@ async def start_traffic_system():
         if success:
             return {"success": True, "message": "Traffic system started"}
         else:
-            return {"success": False, "message": "Failed to start traffic system"}
+            return {"success": False, "message": "Failed to start traffic system - Arduino not connected"}
     except Exception as e:
         return {"success": False, "message": f"Start system error: {str(e)}"}
 
@@ -198,7 +208,7 @@ async def stop_traffic_system():
         if success:
             return {"success": True, "message": "Traffic system stopped"}
         else:
-            return {"success": False, "message": "Failed to stop traffic system"}
+            return {"success": False, "message": "Failed to stop traffic system - Arduino not connected"}
     except Exception as e:
         return {"success": False, "message": f"Stop system error: {str(e)}"}
 
@@ -210,7 +220,7 @@ async def update_traffic_data(request: TrafficDataRequest):
         if success:
             return {"success": True, "message": "Traffic data sent to Arduino"}
         else:
-            return {"success": False, "message": "Failed to send traffic data"}
+            return {"success": False, "message": "Failed to send traffic data - Arduino not connected"}
     except Exception as e:
         return {"success": False, "message": f"Traffic data error: {str(e)}"}
 
@@ -218,6 +228,14 @@ async def update_traffic_data(request: TrafficDataRequest):
 async def get_arduino_status():
     """Get Arduino connection and system status"""
     try:
+        if not startup_complete:
+            return {
+                "connected": False,
+                "port": "N/A",
+                "available_ports": [],
+                "message": "Backend starting up..."
+            }
+        
         return {
             "connected": arduino_controller.connected,
             "port": arduino_controller.port,
@@ -235,11 +253,22 @@ async def health_check():
     return {
         "status": "healthy", 
         "model": MODEL_ENDPOINT,
-        "arduino_connected": arduino_controller.connected
+        "arduino_connected": arduino_controller.connected,
+        "startup_complete": startup_complete
     }
 
 @app.on_event("startup")
 async def startup_event():
-    """Try to connect to Arduino on startup"""
-    print("Attempting to connect to Arduino...")
-    initialize_arduino()
+    """Initialize services on startup with proper delays"""
+    global startup_complete
+    print("=== Starting Vehicle Detection API with Arduino Integration ===")
+    print("Initializing backend services...")
+    
+    # Give the system time to fully start
+    await asyncio.sleep(2)
+    
+    print("Backend services initialized successfully")
+    print("Arduino connection will be available via web interface")
+    print("=== Backend ready for connections ===")
+    
+    startup_complete = True

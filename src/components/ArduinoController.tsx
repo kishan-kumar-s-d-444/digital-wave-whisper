@@ -20,42 +20,95 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
   const [systemActive, setSystemActive] = useState(false);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [backendReady, setBackendReady] = useState(false);
 
   useEffect(() => {
-    checkArduinoStatus();
-    const interval = setInterval(checkArduinoStatus, 5000);
-    return () => clearInterval(interval);
+    // Wait longer before first check to allow backend to start
+    const initialDelay = setTimeout(() => {
+      checkBackendHealth();
+    }, 3000);
+
+    return () => clearTimeout(initialDelay);
   }, []);
 
-  const checkArduinoStatus = async () => {
+  useEffect(() => {
+    if (backendReady) {
+      checkArduinoStatus();
+      const interval = setInterval(checkArduinoStatus, 8000); // Increased interval
+      return () => clearInterval(interval);
+    }
+  }, [backendReady]);
+
+  const checkBackendHealth = async () => {
     try {
       setIsLoading(true);
-      const response = await fetch(`${API_BASE_URL}/arduino/status`, {
-        signal: AbortSignal.timeout(3000)
+      console.log("Checking backend health...");
+      
+      const response = await fetch(`${API_BASE_URL}/health`, {
+        signal: AbortSignal.timeout(5000)
       });
       
-      if (!response.ok) throw new Error('API response not OK');
+      if (!response.ok) throw new Error('Backend not ready');
       
       const data = await response.json();
-      setIsConnected(data.connected);
-      setAvailablePorts((data.available_ports || []).filter(port => port && port.trim() !== ''));
-      onConnectionChange(data.connected);
+      console.log("Backend health check passed:", data);
+      setBackendReady(true);
       setError("");
     } catch (err) {
-      console.error("Failed to check Arduino status:", err);
-      setIsConnected(false);
-      onConnectionChange(false);
-      setError("Backend service unavailable");
+      console.error("Backend not ready:", err);
+      setBackendReady(false);
+      setError("Backend service is starting up... Please wait");
+      
+      // Retry after delay
+      setTimeout(checkBackendHealth, 5000);
     } finally {
       setIsLoading(false);
     }
   };
 
+  const checkArduinoStatus = async () => {
+    if (!backendReady) return;
+    
+    try {
+      console.log("Checking Arduino status...");
+      const response = await fetch(`${API_BASE_URL}/arduino/status`, {
+        signal: AbortSignal.timeout(5000)
+      });
+      
+      if (!response.ok) throw new Error('Arduino status check failed');
+      
+      const data = await response.json();
+      console.log("Arduino status:", data);
+      
+      setIsConnected(data.connected);
+      setAvailablePorts((data.available_ports || []).filter(port => port && port.trim() !== ''));
+      onConnectionChange(data.connected);
+      
+      if (error && !error.includes("Backend service")) {
+        setError("");
+      }
+    } catch (err) {
+      console.error("Failed to check Arduino status:", err);
+      setIsConnected(false);
+      onConnectionChange(false);
+      if (backendReady) {
+        setError("Failed to communicate with Arduino controller");
+      }
+    }
+  };
+
   const connectArduino = async () => {
+    if (!backendReady) {
+      setError("Backend service is not ready yet. Please wait...");
+      return;
+    }
+
     setIsConnecting(true);
     setError("");
     
     try {
+      console.log("Attempting to connect Arduino on port:", selectedPort);
+      
       const response = await fetch(`${API_BASE_URL}/arduino/connect`, {
         method: 'POST',
         headers: {
@@ -64,18 +117,26 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
         body: JSON.stringify({
           port: selectedPort === "auto" ? null : selectedPort
         }),
-        signal: AbortSignal.timeout(5000)
+        signal: AbortSignal.timeout(10000) // Increased timeout for connection
       });
 
       const data = await response.json();
+      console.log("Arduino connection response:", data);
       
       if (!response.ok) throw new Error(data.message || "Failed to connect to Arduino");
+      
+      // Wait a bit for Arduino to initialize
+      await new Promise(resolve => setTimeout(resolve, 2000));
       
       setIsConnected(true);
       onConnectionChange(true);
       setError("");
+      
+      // Refresh status after connection
+      setTimeout(checkArduinoStatus, 1000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to connect to Arduino");
+      const errorMsg = err instanceof Error ? err.message : "Failed to connect to Arduino";
+      setError(errorMsg);
       console.error("Arduino connection error:", err);
     } finally {
       setIsConnecting(false);
@@ -84,9 +145,10 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
 
   const disconnectArduino = async () => {
     try {
+      console.log("Disconnecting Arduino...");
       const response = await fetch(`${API_BASE_URL}/arduino/disconnect`, {
         method: 'POST',
-        signal: AbortSignal.timeout(3000)
+        signal: AbortSignal.timeout(5000)
       });
 
       const data = await response.json();
@@ -105,9 +167,10 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
 
   const startTrafficSystem = async () => {
     try {
+      console.log("Starting traffic system...");
       const response = await fetch(`${API_BASE_URL}/arduino/start`, {
         method: 'POST',
-        signal: AbortSignal.timeout(3000)
+        signal: AbortSignal.timeout(5000)
       });
 
       const data = await response.json();
@@ -124,9 +187,10 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
 
   const stopTrafficSystem = async () => {
     try {
+      console.log("Stopping traffic system...");
       const response = await fetch(`${API_BASE_URL}/arduino/stop`, {
         method: 'POST',
-        signal: AbortSignal.timeout(3000)
+        signal: AbortSignal.timeout(5000)
       });
 
       const data = await response.json();
@@ -143,7 +207,11 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
 
   const handleRetry = () => {
     setError("");
-    checkArduinoStatus();
+    if (!backendReady) {
+      checkBackendHealth();
+    } else {
+      checkArduinoStatus();
+    }
   };
 
   return (
@@ -154,10 +222,19 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
           Arduino Traffic Controller
           <Badge 
             variant="secondary" 
-            className={`ml-2 ${isConnected ? 'bg-green-600' : 'bg-red-600'} text-white`}
+            className={`ml-2 ${isConnected ? 'bg-green-600' : backendReady ? 'bg-yellow-600' : 'bg-red-600'} text-white`}
           >
-            {isConnected ? <Wifi className="h-3 w-3 mr-1" /> : <WifiOff className="h-3 w-3 mr-1" />}
-            {isConnected ? 'Connected' : 'Disconnected'}
+            {isConnected ? (
+              <>
+                <Wifi className="h-3 w-3 mr-1" />
+                Connected
+              </>
+            ) : (
+              <>
+                <WifiOff className="h-3 w-3 mr-1" />
+                {backendReady ? 'Ready' : 'Starting...'}
+              </>
+            )}
           </Badge>
         </CardTitle>
       </CardHeader>
@@ -181,9 +258,12 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
           </Alert>
         )}
 
-        {isLoading ? (
-          <div className="flex justify-center py-4">
+        {isLoading || !backendReady ? (
+          <div className="flex flex-col items-center justify-center py-4 space-y-2">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
+            <p className="text-white text-sm">
+              {!backendReady ? "Waiting for backend service..." : "Loading..."}
+            </p>
           </div>
         ) : !isConnected ? (
           <div className="space-y-3">
@@ -213,7 +293,7 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
             </div>
             <Button 
               onClick={connectArduino} 
-              disabled={isConnecting}
+              disabled={isConnecting || !backendReady}
               className="w-full bg-green-600 hover:bg-green-700"
             >
               {isConnecting ? (
@@ -278,7 +358,8 @@ export const ArduinoController = ({ onConnectionChange }: ArduinoControllerProps
         <div className="text-xs text-purple-200 space-y-1">
           <p>• Connect Arduino Mega via USB</p>
           <p>• Upload traffic_controller.ino to Arduino</p>
-          <p>• Traffic lights will be controlled automatically</p>
+          <p>• Start Python backend server first</p>
+          <p>• Traffic lights controlled automatically</p>
           <p>• Emergency vehicles get priority override</p>
         </div>
       </CardContent>
