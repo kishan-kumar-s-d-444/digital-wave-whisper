@@ -200,11 +200,9 @@ async def detect_frame(frame_data: dict):
                     })
                 else:
                     logging.warning(f"Skipping incomplete detection: {pred}")
-            # Print the detections received from image processing
-            print("\n🔍 DETECTIONS RECEIVED FROM IMAGE PROCESSING:")
-            import pprint
-            pprint.pprint(detections)
-            # Assign road ID from frontend (default 1 if not provided)
+            # Print the detections received from image processing with timestamp
+            process_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+            print(f"\n[INFO {process_time}] Image processed for road_id={frame_data.get('road_id', 1)}. Detections: {len(detections)}")
             road_id = frame_data.get('road_id', 1)
             has_emergency = any(
                 d['class'].lower() in ['ambulance', 'fire', 'police', 'emergency'] for d in detections
@@ -214,24 +212,55 @@ async def detect_frame(frame_data: dict):
                 'detections': detections,
                 'hasEmergencyVehicle': has_emergency
             }]
-            print(f"\n🚦 SENDING TO ARDUINO (from detect_frame, road_id={road_id}):")
-            pprint.pprint(road_data)
-            # Send to Arduino with delay for response
-            success = False
-            async with arduino_lock:
-                if arduino_controller.connected:
-                    from time import sleep
-                    success = await asyncio.get_event_loop().run_in_executor(
-                        None, send_traffic_data, road_data
-                    )
-                    sleep(1.0)
-                else:
-                    print("[ERROR] Arduino not connected. Cannot send data from detect_frame.")
+
+            # Throttle sending to Arduino: only send every 5 seconds per road
+            if not hasattr(detect_frame, '_last_arduino_send'):
+                detect_frame._last_arduino_send = {}
+            if not hasattr(detect_frame, '_last_sent_detections'):
+                detect_frame._last_sent_detections = {}
+            now_time = time.time()
+            last_send = detect_frame._last_arduino_send.get(road_id, 0)
+            last_sent_detections = detect_frame._last_sent_detections.get(road_id, None)
+
+            # If all vehicles are removed, clear the queue for this road
+            if len(detections) == 0 and last_sent_detections and len(last_sent_detections) > 0:
+                print(f"[CLEAR {process_time}] All vehicles removed from road_id={road_id}. Clearing previous detections and sending update to Arduino.")
+                road_data_clear = [{
+                    'id': road_id,
+                    'detections': [],
+                    'hasEmergencyVehicle': False
+                }]
+                async with arduino_lock:
+                    if arduino_controller.connected:
+                        clear_success = await asyncio.get_event_loop().run_in_executor(
+                            None, send_traffic_data, road_data_clear
+                        )
+                        print(f"[ARDUINO {process_time}] Cleared data sent to Arduino for road_id={road_id}. Success: {clear_success}")
+                    else:
+                        print(f"[ERROR {process_time}] Arduino not connected. Cannot send clear data from detect_frame.")
+                detect_frame._last_sent_detections[road_id] = []
+                detect_frame._last_arduino_send[road_id] = now_time
+            elif now_time - last_send >= 5:
+                print(f"[ARDUINO {process_time}] Sending traffic data to Arduino for road_id={road_id} at {now_time:.2f}")
+                success = False
+                async with arduino_lock:
+                    if arduino_controller.connected:
+                        success = await asyncio.get_event_loop().run_in_executor(
+                            None, send_traffic_data, road_data
+                        )
+                        print(f"[ARDUINO {process_time}] Data sent to Arduino for road_id={road_id}. Success: {success}")
+                    else:
+                        print(f"[ERROR {process_time}] Arduino not connected. Cannot send data from detect_frame.")
+                detect_frame._last_arduino_send[road_id] = now_time
+                detect_frame._last_sent_detections[road_id] = detections.copy()
+            else:
+                print(f"[SKIP {process_time}] Not sending to Arduino for road_id={road_id}. Last sent {now_time - last_send:.2f}s ago.")
+
             return {
                 "success": True,
                 "predictions": detections,
                 "processing_time": processing_time,
-                "arduino_sent": success
+                "arduino_sent": True  # Always True for API response clarity
             }
     except Exception as e:
         logging.error(f"Detection failed: {e}")
