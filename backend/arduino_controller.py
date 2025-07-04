@@ -198,21 +198,38 @@ def send_traffic_data(data: List[Dict]):
     1. Emergency vehicles get highest priority
     2. Roads with more vehicles get higher priority
     """
-    sorted_roads = sorted(
-        data,
-        key=lambda x: (-int(x.get('hasEmergencyVehicle', False)), 
-                      -len(x.get('detections', [])))
-    )
-    print("\n=== SENDING TRAFFIC DATA ===")
-    all_success = True
-    for road in sorted_roads:
-        success = arduino_controller.update_road_data(
-            road.get('id', 1),
-            len(road.get('detections', [])),
-            road.get('hasEmergencyVehicle', False)
+    import time
+    # Use a lock to prevent concurrent sends
+    if not hasattr(send_traffic_data, "_lock"):
+        from threading import Lock
+        send_traffic_data._lock = Lock()
+    lock = send_traffic_data._lock
+
+    acquired = lock.acquire(blocking=False)
+    if not acquired:
+        print("[INFO] Arduino update in progress, skipping this request.")
+        return False
+    try:
+        sorted_roads = sorted(
+            data,
+            key=lambda x: (-int(x.get('hasEmergencyVehicle', False)), 
+                        -len(x.get('detections', [])))
         )
-        if not success:
-            print(f"[ERROR] Failed to send data for road {road.get('id', 1)}")
-            all_success = False
-    print("=== DATA SENT ===\n")
-    return all_success
+        print("\n=== SENDING TRAFFIC DATA ===")
+        all_success = True
+        # Wait 2 seconds before sending to Arduino
+        print("[DELAY] Waiting 2 seconds before sending to Arduino...")
+        time.sleep(2)
+        for road in sorted_roads:
+            success = arduino_controller.update_road_data(
+                road.get('id', 1),
+                len(road.get('detections', [])),
+                road.get('hasEmergencyVehicle', False)
+            )
+            if not success:
+                print(f"[ERROR] Failed to send data for road {road.get('id', 1)}")
+                all_success = False
+        print("=== DATA SENT ===\n")
+        return all_success
+    finally:
+        lock.release()

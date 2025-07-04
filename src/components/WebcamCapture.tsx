@@ -163,7 +163,8 @@ export const WebcamCapture = ({
       onStatusChange(true);
       setError("");
 
-      const interval = setInterval(performDetection, 500);
+      // Increase detection interval to 2000ms (2 seconds) for stability
+      const interval = setInterval(performDetection, 2000);
       setDetectionInterval(interval);
     } catch (err) {
       setError("Failed to access webcam. Please ensure camera permissions are granted and the selected camera is available.");
@@ -213,6 +214,8 @@ export const WebcamCapture = ({
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
     const imageData = canvas.toDataURL('image/jpeg', 0.8);
+    const originalWidth = canvas.width;
+    const originalHeight = canvas.height;
 
     try {
       const response = await fetch(`${API_BASE_URL}/detect_frame`, {
@@ -223,7 +226,10 @@ export const WebcamCapture = ({
         body: JSON.stringify({
           image: imageData,
           confidence_threshold: confidenceThreshold,
-          overlap_threshold: overlapThreshold
+          overlap_threshold: overlapThreshold,
+          original_width: originalWidth,
+          original_height: originalHeight,
+          road_id: cameraId // Pass the cameraId as road_id
         }),
         signal: AbortSignal.timeout(10000)
       });
@@ -236,9 +242,16 @@ export const WebcamCapture = ({
       const now = Date.now();
 
       if (result.success && result.predictions) {
+        // Debug: Log received detections
+        console.log('Received detections from backend:', result.predictions);
         const updatedDetections = [...recentDetections];
 
+        // Store original image size with each detection
+        const origW = result.original_width || originalWidth;
+        const origH = result.original_height || originalHeight;
+
         result.predictions.forEach((pred: Detection) => {
+          const detectionWithSize = { ...pred, originalWidth: origW, originalHeight: origH };
           const existing = updatedDetections.find(
             (item) =>
               item.detection.class === pred.class &&
@@ -247,13 +260,14 @@ export const WebcamCapture = ({
           );
 
           if (existing) {
-            existing.detection = pred;
+            existing.detection = detectionWithSize;
             existing.timestamp = now;
           } else {
-            updatedDetections.push({ detection: pred, timestamp: now });
+            updatedDetections.push({ detection: detectionWithSize, timestamp: now });
           }
         });
 
+        // Don't filter out any detections for debugging (show all for 10s)
         const filtered = updatedDetections.filter(item => now - item.timestamp <= 10000);
         setRecentDetections(filtered);
         onDetectionUpdate(filtered.map(d => d.detection));
@@ -278,7 +292,21 @@ export const WebcamCapture = ({
   ) => {
     ctx.globalAlpha = opacityThreshold;
 
-    predictions.forEach(({ x, y, width: boxWidth, height: boxHeight, class: className, confidence }) => {
+    predictions.forEach((det) => {
+      // Debug: Log each detection being drawn
+      console.log('Drawing detection:', det);
+      // Scale coordinates to current canvas size
+      const origW = det.originalWidth || width;
+      const origH = det.originalHeight || height;
+      const scaleX = width / origW;
+      const scaleY = height / origH;
+      const x = det.x * scaleX;
+      const y = det.y * scaleY;
+      const boxWidth = det.width * scaleX;
+      const boxHeight = det.height * scaleY;
+      const className = det.class;
+      const confidence = det.confidence;
+
       const boxX = x - boxWidth / 2;
       const boxY = y - boxHeight / 2;
 
@@ -291,13 +319,14 @@ export const WebcamCapture = ({
       ctx.lineWidth = 3;
       ctx.strokeRect(boxX, boxY, boxWidth, boxHeight);
 
-      if (labelDisplayMode === "Hidden") return;
-
+      // Always show class label (and confidence if enabled)
       let label = className;
       if (labelDisplayMode === "Draw Confidence") {
         label = `${className} ${Math.round(confidence * 100)}%`;
+      } else if (labelDisplayMode === "Class Only") {
+        label = className;
       }
-
+      // Never hide label (for demo clarity)
       ctx.font = '16px Arial';
       const textWidth = ctx.measureText(label).width;
 

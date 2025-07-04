@@ -7,6 +7,8 @@ import base64
 import requests
 import time
 import asyncio
+import logging
+import random
 from arduino_controller import arduino_controller, initialize_arduino, send_traffic_data
 
 app = FastAPI(title="Vehicle Detection API with Arduino Integration")
@@ -20,10 +22,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Roboflow configuration
 ROBOFLOW_API_KEY = "ExruF1SjptGtjyzU1rAc"
 MODEL_ENDPOINT = "idp-qwteg/1"
 ROBOFLOW_URL = f"https://detect.roboflow.com/{MODEL_ENDPOINT}"
+
+
+# --- Robust Roboflow request function and coordination primitives ---
+import asyncio
+roboflow_lock = asyncio.Lock()
+arduino_lock = asyncio.Lock()
+last_detection_time = 0
+MIN_DETECTION_INTERVAL = 1.0  # seconds
+
+def roboflow_detect(base64_image, confidence=0.5, overlap=0.5, max_retries=3, timeout=30):
+    headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+    params = {
+        'api_key': ROBOFLOW_API_KEY,
+        'confidence': confidence,
+        'overlap': overlap
+    }
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post(
+                ROBOFLOW_URL,
+                headers=headers,
+                params=params,
+                data=base64_image,
+                timeout=timeout
+            )
+            if response.status_code == 200:
+                result = response.json()
+                preds = result.get('predictions', [])
+                if not isinstance(preds, list):
+                    preds = []
+                return True, preds, None
+            else:
+                last_error = f"Roboflow API error: {response.status_code} {response.text}"
+                logging.warning(f"[Roboflow] Attempt {attempt}: {last_error}")
+        except Exception as e:
+            last_error = str(e)
+            logging.warning(f"[Roboflow] Attempt {attempt} Exception: {last_error}")
+        time.sleep(1.5 * attempt)
+    return False, [], last_error or "Unknown Roboflow error"
 
 # Startup flag
 startup_complete = False
@@ -54,137 +97,144 @@ class ArduinoConnectionRequest(BaseModel):
 class TrafficDataRequest(BaseModel):
     road_data: List[Dict]
 
+
+
 @app.post("/detect", response_model=DetectionResponse)
 async def detect_objects(
     file: UploadFile = File(...),
     confidence_threshold: float = 0.5,
     overlap_threshold: float = 0.5
 ):
+    """
+    Robust vehicle detection endpoint using Roboflow with retry and error handling, and detection throttling.
+    """
+    global last_detection_time
     try:
-        start_time = time.time()
-        image_data = await file.read()
-        base64_image = base64.b64encode(image_data).decode('utf-8')
-
-        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-        params = {
-            'api_key': ROBOFLOW_API_KEY,
-            'confidence': confidence_threshold,
-            'overlap': overlap_threshold
-        }
-
-        response = requests.post(
-            ROBOFLOW_URL,
-            headers=headers,
-            params=params,
-            data=base64_image,
-            timeout=30
-        )
-
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail=f"Roboflow API error: {response.status_code}")
-
-        result = response.json()
-        processing_time = time.time() - start_time
-
-        detections = [
-            Detection(
-                class_name=pred['class'],
-                confidence=pred['confidence'],
-                x=pred['x'],
-                y=pred['y'],
-                width=pred['width'],
-                height=pred['height']
+        async with roboflow_lock:
+            now = time.time()
+            if now - last_detection_time < MIN_DETECTION_INTERVAL:
+                wait_time = MIN_DETECTION_INTERVAL - (now - last_detection_time)
+                await asyncio.sleep(wait_time)
+            last_detection_time = time.time()
+            start_time = time.time()
+            image_data = await file.read()
+            base64_image = base64.b64encode(image_data).decode('utf-8')
+            ok, preds, error = await asyncio.get_event_loop().run_in_executor(
+                None, roboflow_detect, base64_image, confidence_threshold, overlap_threshold
             )
-            for pred in result.get('predictions', [])
-        ]
-
+            processing_time = time.time() - start_time
+            if not ok:
+                logging.error(f"[Roboflow] Detection failed: {error}")
+                return DetectionResponse(
+                    success=False,
+                    detections=[],
+                    total_detections=0,
+                    processing_time=processing_time
+                )
+            detections = []
+            for pred in preds:
+                if all(k in pred for k in ('class', 'confidence', 'x', 'y', 'width', 'height')):
+                    detections.append(Detection(
+                        class_name=pred['class'],
+                        confidence=pred['confidence'],
+                        x=pred['x'],
+                        y=pred['y'],
+                        width=pred['width'],
+                        height=pred['height']
+                    ))
+                else:
+                    logging.warning(f"Skipping incomplete detection: {pred}")
+            return DetectionResponse(
+                success=True,
+                detections=detections,
+                total_detections=len(detections),
+                processing_time=processing_time
+            )
+    except Exception as e:
+        logging.error(f"Detection failed: {e}")
         return DetectionResponse(
-            success=True,
-            detections=detections,
-            total_detections=len(detections),
-            processing_time=processing_time
+            success=False,
+            detections=[],
+            total_detections=0,
+            processing_time=0.0
         )
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Detection failed: {str(e)}")
+
 
 @app.post("/detect_frame")
 async def detect_frame(frame_data: dict):
+    """
+    Robust vehicle detection from frame data using Roboflow with retry and error handling, and smooth hardware coordination.
+    """
+    global last_detection_time
     try:
-        start_time = time.time()
-
-        base64_data = frame_data.get('image', '').split(',')[1] if ',' in frame_data.get('image', '') else frame_data.get('image', '')
-        if not base64_data:
-            raise HTTPException(status_code=400, detail="No image data provided")
-
-        confidence_threshold = frame_data.get('confidence_threshold', 0.5)
-        overlap_threshold = frame_data.get('overlap_threshold', 0.5)
-
-        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-        params = {
-            'api_key': ROBOFLOW_API_KEY,
-            'confidence': confidence_threshold,
-            'overlap': overlap_threshold
-        }
-
-        response = requests.post(
-            ROBOFLOW_URL,
-            headers=headers,
-            params=params,
-            data=base64_data,
-            timeout=10
-        )
-
-        if response.status_code != 200:
-            return {"success": False, "predictions": [], "error": f"API error: {response.status_code}"}
-
-        result = response.json()
-        processing_time = time.time() - start_time
-
-        detections = [{
-            'class': pred['class'],
-            'confidence': pred['confidence'],
-            'x': pred['x'],
-            'y': pred['y'],
-            'width': pred['width'],
-            'height': pred['height']
-        } for pred in result.get('predictions', [])]
-
-        # Print the detections received from image processing
-        print("\n🔍 DETECTIONS RECEIVED FROM IMAGE PROCESSING:")
-        import pprint
-        pprint.pprint(detections)
-
-        # Prepare road data for Arduino (assuming single lane, id=1; adjust as needed)
-        has_emergency = any(
-            d['class'].lower() in ['ambulance', 'fire', 'police', 'emergency'] for d in detections
-        )
-        road_data = [{
-            'id': 1,  # You may want to set this dynamically if you have multiple lanes
-            'detections': detections,
-            'hasEmergencyVehicle': has_emergency
-        }]
-
-        print("\n🚦 SENDING TO ARDUINO (from detect_frame):")
-        pprint.pprint(road_data)
-
-        # Send to Arduino with delay for response
-        success = False
-        if arduino_controller.connected:
-            from time import sleep
-            success = send_traffic_data(road_data)
-            sleep(1.5)  # Sufficient delay for Arduino to process
-        else:
-            print("[ERROR] Arduino not connected. Cannot send data from detect_frame.")
-
-        return {
-            "success": True,
-            "predictions": detections,
-            "processing_time": processing_time,
-            "arduino_sent": success
-        }
-
+        async with roboflow_lock:
+            now = time.time()
+            if now - last_detection_time < MIN_DETECTION_INTERVAL:
+                wait_time = MIN_DETECTION_INTERVAL - (now - last_detection_time)
+                await asyncio.sleep(wait_time)
+            last_detection_time = time.time()
+            start_time = time.time()
+            base64_data = frame_data.get('image', '').split(',')[1] if ',' in frame_data.get('image', '') else frame_data.get('image', '')
+            if not base64_data:
+                return {"success": False, "predictions": [], "error": "No image data provided"}
+            confidence_threshold = frame_data.get('confidence_threshold', 0.5)
+            overlap_threshold = frame_data.get('overlap_threshold', 0.5)
+            ok, preds, error = await asyncio.get_event_loop().run_in_executor(
+                None, roboflow_detect, base64_data, confidence_threshold, overlap_threshold, 3, 10
+            )
+            processing_time = time.time() - start_time
+            if not ok:
+                logging.error(f"[Roboflow] detect_frame failed: {error}")
+                return {"success": False, "predictions": [], "error": error, "processing_time": processing_time}
+            detections = []
+            for pred in preds:
+                if all(k in pred for k in ('class', 'confidence', 'x', 'y', 'width', 'height')):
+                    detections.append({
+                        'class': pred['class'],
+                        'confidence': pred['confidence'],
+                        'x': pred['x'],
+                        'y': pred['y'],
+                        'width': pred['width'],
+                        'height': pred['height']
+                    })
+                else:
+                    logging.warning(f"Skipping incomplete detection: {pred}")
+            # Print the detections received from image processing
+            print("\n🔍 DETECTIONS RECEIVED FROM IMAGE PROCESSING:")
+            import pprint
+            pprint.pprint(detections)
+            # Assign road ID from frontend (default 1 if not provided)
+            road_id = frame_data.get('road_id', 1)
+            has_emergency = any(
+                d['class'].lower() in ['ambulance', 'fire', 'police', 'emergency'] for d in detections
+            )
+            road_data = [{
+                'id': road_id,
+                'detections': detections,
+                'hasEmergencyVehicle': has_emergency
+            }]
+            print(f"\n🚦 SENDING TO ARDUINO (from detect_frame, road_id={road_id}):")
+            pprint.pprint(road_data)
+            # Send to Arduino with delay for response
+            success = False
+            async with arduino_lock:
+                if arduino_controller.connected:
+                    from time import sleep
+                    success = await asyncio.get_event_loop().run_in_executor(
+                        None, send_traffic_data, road_data
+                    )
+                    sleep(1.0)
+                else:
+                    print("[ERROR] Arduino not connected. Cannot send data from detect_frame.")
+            return {
+                "success": True,
+                "predictions": detections,
+                "processing_time": processing_time,
+                "arduino_sent": success
+            }
     except Exception as e:
+        logging.error(f"Detection failed: {e}")
         return {"success": False, "predictions": [], "error": str(e)}
 
 @app.get("/health")
