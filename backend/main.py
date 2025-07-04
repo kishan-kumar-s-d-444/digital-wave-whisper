@@ -21,8 +21,8 @@ app.add_middleware(
 )
 
 # Roboflow configuration
-ROBOFLOW_API_KEY = "qDrma4OYH0YLt5Wh8iEp"
-MODEL_ENDPOINT = "toy-vehicle-detection-te7wp/3"
+ROBOFLOW_API_KEY = "ExruF1SjptGtjyzU1rAc"
+MODEL_ENDPOINT = "idp-qwteg/1"
 ROBOFLOW_URL = f"https://detect.roboflow.com/{MODEL_ENDPOINT}"
 
 # Startup flag
@@ -150,10 +150,38 @@ async def detect_frame(frame_data: dict):
             'height': pred['height']
         } for pred in result.get('predictions', [])]
 
+        # Print the detections received from image processing
+        print("\n🔍 DETECTIONS RECEIVED FROM IMAGE PROCESSING:")
+        import pprint
+        pprint.pprint(detections)
+
+        # Prepare road data for Arduino (assuming single lane, id=1; adjust as needed)
+        has_emergency = any(
+            d['class'].lower() in ['ambulance', 'fire', 'police', 'emergency'] for d in detections
+        )
+        road_data = [{
+            'id': 1,  # You may want to set this dynamically if you have multiple lanes
+            'detections': detections,
+            'hasEmergencyVehicle': has_emergency
+        }]
+
+        print("\n🚦 SENDING TO ARDUINO (from detect_frame):")
+        pprint.pprint(road_data)
+
+        # Send to Arduino with delay for response
+        success = False
+        if arduino_controller.connected:
+            from time import sleep
+            success = send_traffic_data(road_data)
+            sleep(1.5)  # Sufficient delay for Arduino to process
+        else:
+            print("[ERROR] Arduino not connected. Cannot send data from detect_frame.")
+
         return {
             "success": True,
             "predictions": detections,
-            "processing_time": processing_time
+            "processing_time": processing_time,
+            "arduino_sent": success
         }
 
     except Exception as e:
@@ -251,6 +279,10 @@ async def update_traffic_data(request: TrafficDataRequest):
         if not arduino_controller.connected:
             return {"success": False, "message": "Arduino not connected"}
         
+        import pprint
+        print("\n🔍 RAW TRAFFIC DATA RECEIVED FROM FRONTEND:")
+        pprint.pprint(request.road_data)
+
         success = send_traffic_data(request.road_data)
         if success:
             return {"success": True, "message": "Traffic data sent to Arduino"}

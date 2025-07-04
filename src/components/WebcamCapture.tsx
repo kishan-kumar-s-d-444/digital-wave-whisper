@@ -71,20 +71,35 @@ export const WebcamCapture = ({
   useEffect(() => {
     const getCameras = async () => {
       try {
-        await navigator.mediaDevices.getUserMedia({ video: true });
+        // Request camera permissions if not already granted
+        let stream = null;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        } catch (permErr) {
+          setError("Camera permission denied or not available. Please allow camera access and refresh the page.");
+          setAvailableCameras([]);
+          return;
+        }
         const devices = await navigator.mediaDevices.enumerateDevices();
         const videoDevices = devices.filter(device => device.kind === 'videoinput');
         setAvailableCameras(videoDevices);
-        
+        console.log("Available cameras:", videoDevices);
         if (videoDevices.length > 0) {
           const defaultCamera = propDeviceId 
             ? videoDevices.find(device => device.deviceId === propDeviceId) || videoDevices[0]
             : videoDevices[Math.min(cameraId - 1, videoDevices.length - 1)];
           setSelectedCameraId(defaultCamera.deviceId);
+        } else {
+          setError("No video input devices found. Please connect a webcam.");
+        }
+        // Clean up the stream to release the camera
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
         }
       } catch (err) {
         console.error("Error getting cameras:", err);
-        setError("Failed to get available cameras");
+        setError("Failed to get available cameras. Please check camera permissions and hardware.");
+        setAvailableCameras([]);
       }
     };
 
@@ -357,7 +372,7 @@ export const WebcamCapture = ({
             <Select 
               value={selectedCameraId} 
               onValueChange={handleCameraChange}
-              disabled={isStreaming}
+              // Camera selection is always enabled
             >
               <SelectTrigger className="bg-white/10 border-white/20 text-white">
                 <SelectValue placeholder="Choose a camera..." />
