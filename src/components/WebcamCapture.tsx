@@ -3,7 +3,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertTriangle, Camera, Settings, Wifi, WifiOff, Play, Square } from "lucide-react";
+import { AlertTriangle, Camera, Settings, Wifi, WifiOff, Play, Square, RefreshCw } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface Detection {
@@ -16,7 +16,6 @@ interface Detection {
   originalWidth?: number;
   originalHeight?: number;
 }
-
 
 interface WebcamCaptureProps {
   globalDetectionActive: boolean;
@@ -43,6 +42,8 @@ export const WebcamCapture = ({
   const [detectionInterval, setDetectionInterval] = useState<NodeJS.Timeout | null>(null);
   const [apiConnected, setApiConnected] = useState(false);
   const [isCheckingApi, setIsCheckingApi] = useState(false);
+  const [connectionAttempts, setConnectionAttempts] = useState(0);
+  const [isReconnecting, setIsReconnecting] = useState(false);
 
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.5);
   const [overlapThreshold, setOverlapThreshold] = useState(0.5);
@@ -70,11 +71,31 @@ export const WebcamCapture = ({
     }
   }, [globalDetectionActive]);
 
+  // Auto-reconnection logic
+  useEffect(() => {
+    let reconnectTimeout: NodeJS.Timeout;
+    
+    if (!apiConnected && connectionAttempts < 10 && !isCheckingApi) {
+      const delay = Math.min(2000 * Math.pow(1.5, connectionAttempts), 30000); // Exponential backoff, max 30s
+      console.log(`Scheduling reconnection attempt ${connectionAttempts + 1} in ${delay}ms`);
+      
+      reconnectTimeout = setTimeout(() => {
+        console.log(`Reconnection attempt ${connectionAttempts + 1}`);
+        checkApiConnection();
+      }, delay);
+    }
+
+    return () => {
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+    };
+  }, [apiConnected, connectionAttempts, isCheckingApi]);
+
   // Get available cameras on component mount
   useEffect(() => {
     const getCameras = async () => {
       try {
-        // Request camera permissions if not already granted
         let stream = null;
         try {
           stream = await navigator.mediaDevices.getUserMedia({ video: true });
@@ -95,7 +116,6 @@ export const WebcamCapture = ({
         } else {
           setError("No video input devices found. Please connect a webcam.");
         }
-        // Clean up the stream to release the camera
         if (stream) {
           stream.getTracks().forEach(track => track.stop());
         }
@@ -112,25 +132,59 @@ export const WebcamCapture = ({
   const checkApiConnection = async () => {
     setIsCheckingApi(true);
     try {
+      console.log(`API connection check attempt ${connectionAttempts + 1}`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
+      
       const response = await fetch(`${API_BASE_URL}/health`, {
         method: 'GET',
-        signal: AbortSignal.timeout(5000)
+        signal: controller.signal,
+        headers: {
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
+        }
       });
 
+      clearTimeout(timeoutId);
+
       if (response.ok) {
+        const data = await response.json();
+        console.log("Backend health check successful:", data);
         setApiConnected(true);
+        setConnectionAttempts(0);
         setError("");
+        setIsReconnecting(false);
       } else {
-        setApiConnected(false);
-        setError("Backend API is not responding correctly");
+        throw new Error(`Backend responded with status: ${response.status}`);
       }
     } catch (err) {
-      setApiConnected(false);
-      setError("Cannot connect to backend API. Make sure the Python server is running on http://localhost:8000");
       console.error("API connection error:", err);
+      setApiConnected(false);
+      setConnectionAttempts(prev => prev + 1);
+      
+      if (err instanceof Error) {
+        if (err.name === 'AbortError') {
+          setError("Backend connection timeout. Make sure Python server is running on http://localhost:8000");
+        } else {
+          setError(`Backend connection failed: ${err.message}. Please start the Python server.`);
+        }
+      } else {
+        setError("Cannot connect to backend API. Make sure the Python server is running on http://localhost:8000");
+      }
+      
+      if (isStreaming) {
+        setIsReconnecting(true);
+      }
     } finally {
       setIsCheckingApi(false);
     }
+  };
+
+  const forceReconnect = () => {
+    console.log("Force reconnecting to backend...");
+    setConnectionAttempts(0);
+    setIsReconnecting(true);
+    checkApiConnection();
   };
 
   const startWebcam = async () => {
@@ -166,8 +220,8 @@ export const WebcamCapture = ({
       onStatusChange(true);
       setError("");
 
-      // Increase detection interval to 2000ms (2 seconds) for stability
-      const interval = setInterval(performDetection, 1000);
+      // Start detection with longer interval for stability
+      const interval = setInterval(performDetection, 2000);
       setDetectionInterval(interval);
     } catch (err) {
       setError("Failed to access webcam. Please ensure camera permissions are granted and the selected camera is available.");
@@ -205,7 +259,17 @@ export const WebcamCapture = ({
   };
 
   const performDetection = async () => {
-    if (!videoRef.current || !canvasRef.current || !apiConnected) return;
+    if (!videoRef.current || !canvasRef.current) return;
+
+    // Check API connection before attempting detection
+    if (!apiConnected) {
+      console.log("API not connected, skipping detection");
+      if (!isCheckingApi && !isReconnecting) {
+        console.log("Attempting to reconnect to API...");
+        checkApiConnection();
+      }
+      return;
+    }
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
@@ -221,6 +285,9 @@ export const WebcamCapture = ({
     const originalHeight = canvas.height;
 
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout for detection
+
       const response = await fetch(`${API_BASE_URL}/detect_frame`, {
         method: 'POST',
         headers: {
@@ -232,24 +299,24 @@ export const WebcamCapture = ({
           overlap_threshold: overlapThreshold,
           original_width: originalWidth,
           original_height: originalHeight,
-          road_id: cameraId // Pass the cameraId as road_id
+          road_id: cameraId
         }),
-        signal: AbortSignal.timeout(10000)
+        signal: controller.signal
       });
 
+      clearTimeout(timeoutId);
+
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        throw new Error(`HTTP error! Status: ${response.status}`);
       }
 
       const result = await response.json();
       const now = Date.now();
 
       if (result.success && result.predictions) {
-        // Debug: Log received detections
-        console.log('Received detections from backend:', result.predictions);
+        console.log(`Detection successful for camera ${cameraId}:`, result.predictions.length, 'vehicles found');
         const updatedDetections = [...recentDetections];
 
-        // Store original image size with each detection
         const origW = result.original_width || originalWidth;
         const origH = result.original_height || originalHeight;
 
@@ -270,19 +337,30 @@ export const WebcamCapture = ({
           }
         });
 
-        // Don't filter out any detections for debugging (show all for 10s)
         const filtered = updatedDetections.filter(item => now - item.timestamp <= 10000);
         setRecentDetections(filtered);
         onDetectionUpdate(filtered.map(d => d.detection));
         setProcessingTime(result.processing_time || 0);
+        
+        // Reset connection attempts on successful detection
+        if (connectionAttempts > 0) {
+          setConnectionAttempts(0);
+        }
       } else {
         console.warn("Detection failed:", result.error);
       }
     } catch (err) {
       console.error("Detection error:", err);
-      if (err instanceof TypeError && err.message.includes('NetworkError')) {
-        setApiConnected(false);
-        setError("Lost connection to backend API");
+      
+      if (err instanceof Error) {
+        if (err.name === 'AbortError') {
+          console.log("Detection request timed out");
+          setError("Detection request timed out. Backend may be overloaded.");
+        } else if (err.message.includes('NetworkError') || err.message.includes('Failed to fetch')) {
+          console.log("Network error during detection, marking API as disconnected");
+          setApiConnected(false);
+          setError("Lost connection to backend during detection");
+        }
       }
     }
   };
@@ -296,9 +374,6 @@ export const WebcamCapture = ({
     ctx.globalAlpha = opacityThreshold;
 
     predictions.forEach((det) => {
-      // Debug: Log each detection being drawn
-      console.log('Drawing detection:', det);
-      // Scale coordinates to current canvas size
       const origW = det.originalWidth || width;
       const origH = det.originalHeight || height;
       const scaleX = width / origW;
@@ -322,14 +397,13 @@ export const WebcamCapture = ({
       ctx.lineWidth = 3;
       ctx.strokeRect(boxX, boxY, boxWidth, boxHeight);
 
-      // Always show class label (and confidence if enabled)
       let label = className;
       if (labelDisplayMode === "Draw Confidence") {
         label = `${className} ${Math.round(confidence * 100)}%`;
       } else if (labelDisplayMode === "Class Only") {
         label = className;
       }
-      // Never hide label (for demo clarity)
+      
       ctx.font = '16px Arial';
       const textWidth = ctx.measureText(label).width;
 
@@ -342,7 +416,6 @@ export const WebcamCapture = ({
     ctx.globalAlpha = 1.0;
   }, [labelDisplayMode, opacityThreshold]);
 
-  // Continuous drawing loop
   useEffect(() => {
     let animationFrameId: number;
 
@@ -380,14 +453,39 @@ export const WebcamCapture = ({
       <Alert className={`${apiConnected ? 'bg-green-900/50 border-green-500' : 'bg-red-900/50 border-red-500'}`}>
         {apiConnected ? <Wifi className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
         <AlertDescription className="text-white flex items-center justify-between">
-          <span>Backend API: {apiConnected ? 'Connected' : 'Disconnected'}</span>
+          <span>
+            Backend API: {apiConnected ? 'Connected' : 'Disconnected'}
+            {isReconnecting && ' - Reconnecting...'}
+            {connectionAttempts > 0 && ` (Attempt ${connectionAttempts}/10)`}
+          </span>
+          {!apiConnected && (
+            <Button 
+              onClick={forceReconnect} 
+              size="sm" 
+              variant="outline"
+              disabled={isCheckingApi}
+              className="ml-2"
+            >
+              <RefreshCw className={`h-3 w-3 mr-1 ${isCheckingApi ? 'animate-spin' : ''}`} />
+              Retry
+            </Button>
+          )}
         </AlertDescription>
       </Alert>
 
       {error && (
         <Alert className="bg-red-900/50 border-red-500">
           <AlertTriangle className="h-4 w-4" />
-          <AlertDescription className="text-white">{error}</AlertDescription>
+          <AlertDescription className="text-white">
+            {error}
+            <div className="mt-2 text-sm">
+              <strong>To fix this:</strong>
+              <br />1. Open terminal and navigate to backend folder
+              <br />2. Run: <code className="bg-black/20 px-1 rounded">python run.py</code>
+              <br />3. Wait for "BACKEND READY FOR CONNECTIONS" message
+              <br />4. Then click the Retry button above
+            </div>
+          </AlertDescription>
         </Alert>
       )}
 
@@ -404,7 +502,6 @@ export const WebcamCapture = ({
             <Select 
               value={selectedCameraId} 
               onValueChange={handleCameraChange}
-              // Camera selection is always enabled
             >
               <SelectTrigger className="bg-white/10 border-white/20 text-white">
                 <SelectValue placeholder="Choose a camera..." />
@@ -495,6 +592,11 @@ export const WebcamCapture = ({
               <Camera className="h-12 w-12 mx-auto mb-2 opacity-50" />
               <p>{globalDetectionActive ? "Starting detection..." : "No Camera Detection"}</p>
             </div>
+          </div>
+        )}
+        {isReconnecting && (
+          <div className="absolute top-2 right-2 bg-yellow-600 text-white px-2 py-1 rounded text-sm">
+            Reconnecting to backend...
           </div>
         )}
       </div>
