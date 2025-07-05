@@ -34,17 +34,24 @@ void allRedLights();
 
 void setup() {
   Serial.begin(9600);
+  while (!Serial); // Ensure serial is ready
+  delay(1000); // Wait a bit after boot
+
   Serial.println("[BOOT] Arduino Mega Traffic Controller starting...");
-  // Initialize all pins
+
+  // Initialize pins
   for (int i = 0; i < NUM_ROADS; i++) {
     pinMode(greenLEDs[i], OUTPUT);
     pinMode(yellowLEDs[i], OUTPUT);
     pinMode(redLEDs[i], OUTPUT);
-    digitalWrite(redLEDs[i], HIGH);  // Start with all red lights ON
+    digitalWrite(greenLEDs[i], LOW);
+    digitalWrite(yellowLEDs[i], LOW);
+    digitalWrite(redLEDs[i], HIGH);
   }
+
   Serial.println("[BOOT] All red lights ON");
   sendJsonMessage("Arduino Initialized", true);
-  Serial.println("[BOOT] Initialization complete, waiting for commands...");
+  Serial.println("[BOOT] Ready to receive commands...");
 }
 
 void loop() {
@@ -55,7 +62,7 @@ void loop() {
 
     if (!greenActive) {
       int nextRoad = getHighestPriorityRoad();
-      
+
       if (nextRoad != -1) {
         currentRoad = nextRoad;
         startGreenLight(currentRoad);
@@ -63,7 +70,7 @@ void loop() {
       }
     }
 
-    if (greenActive && millis() >= greenEndTime) {
+    if (greenActive && now >= greenEndTime) {
       endGreenLight(currentRoad);
       greenActive = false;
       currentRoad = -1;
@@ -78,56 +85,61 @@ void sendJsonMessage(String message, bool includeStatus) {
     doc["running"] = trafficSystemRunning;
     doc["currentRoad"] = currentRoad + 1;
   }
-  
+
   serializeJson(doc, Serial);
-  Serial.println();
+  Serial.println(); // Ensure newline
+  Serial.flush();   // Force send
 }
 
 void handleSerialCommands() {
-  if (Serial.available()) {
-    String command = Serial.readStringUntil('\n');
-    command.trim();
-    Serial.print("[SERIAL] Received command: ");
-    Serial.println(command);
+  static String inputBuffer;
 
-    if (command == "STATUS") {
-      sendJsonMessage("System operational", true);
-      Serial.println("[INFO] STATUS command processed");
-    }
-    else if (command == "START") {
-      trafficSystemRunning = true;
-      sendJsonMessage("Traffic system started");
-      Serial.println("[INFO] Traffic system started");
-    }
-    else if (command == "STOP") {
-      trafficSystemRunning = false;
-      allRedLights();
-      greenActive = false;
-      currentRoad = -1;
-      sendJsonMessage("Traffic system stopped");
-      Serial.println("[INFO] Traffic system stopped");
-    }
-    else if (command.startsWith("UPDATE:")) {
-      Serial.println("[INFO] Processing UPDATE command");
-      parseUpdateCommand(command);
-    }
-    else {
-      sendJsonMessage("Unknown command");
-      Serial.println("[WARN] Unknown command received");
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '\n') {
+      inputBuffer.trim();
+      if (inputBuffer.length() > 0) {
+        Serial.print("[SERIAL] Received: ");
+        Serial.println(inputBuffer);
+
+        if (inputBuffer == "STATUS") {
+          sendJsonMessage("System operational", true);
+        } 
+        else if (inputBuffer == "START") {
+          trafficSystemRunning = true;
+          sendJsonMessage("Traffic system started");
+        } 
+        else if (inputBuffer == "STOP") {
+          trafficSystemRunning = false;
+          allRedLights();
+          greenActive = false;
+          currentRoad = -1;
+          sendJsonMessage("Traffic system stopped");
+        } 
+        else if (inputBuffer.startsWith("UPDATE:")) {
+          parseUpdateCommand(inputBuffer);
+        } 
+        else {
+          sendJsonMessage("Unknown command");
+        }
+      }
+      inputBuffer = "";
+    } else {
+      inputBuffer += c;
     }
   }
 }
 
 void parseUpdateCommand(String cmd) {
-  Serial.print("[UPDATE] Raw command: ");
+  Serial.print("[UPDATE] Parsing command: ");
   Serial.println(cmd);
+
   cmd.replace("UPDATE:", "");
   int firstColon = cmd.indexOf(':');
   int secondColon = cmd.indexOf(':', firstColon + 1);
 
   if (firstColon == -1 || secondColon == -1) {
     sendJsonMessage("Invalid UPDATE format");
-    Serial.println("[ERROR] Invalid UPDATE format");
     return;
   }
 
@@ -135,54 +147,43 @@ void parseUpdateCommand(String cmd) {
   int count = cmd.substring(firstColon + 1, secondColon).toInt();
   String emergencyStr = cmd.substring(secondColon + 1);
 
-  Serial.print("[UPDATE] Parsed road: ");
-  Serial.print(road + 1);
-  Serial.print(", count: ");
-  Serial.print(count);
-  Serial.print(", emergency: ");
-  Serial.println(emergencyStr);
-
   if (road >= 0 && road < NUM_ROADS) {
     vehicleCounts[road] = count;
     emergencyStatus[road] = (emergencyStr == "true");
 
-    String msg = "Updated Road " + String(road + 1) + 
-                 ": Vehicles=" + String(count) + 
+    String msg = "Updated Road " + String(road + 1) +
+                 ": Vehicles=" + String(count) +
                  ", Emergency=" + (emergencyStatus[road] ? "true" : "false");
     sendJsonMessage(msg);
-    Serial.println("[UPDATE] Road data updated");
   } else {
     sendJsonMessage("Invalid road ID");
-    Serial.println("[ERROR] Invalid road ID");
   }
 }
 
 int getHighestPriorityRoad() {
-  // 1. Emergency vehicle gets highest priority
   for (int i = 0; i < NUM_ROADS; i++) {
     if (emergencyStatus[i]) {
-      Serial.print("[PRIORITY] Emergency vehicle detected on Road ");
+      Serial.print("[PRIORITY] Emergency on Road ");
       Serial.println(i + 1);
       return i;
     }
   }
 
-  // 2. Choose road with highest vehicle count
   int maxCount = 0;
-  int selectedRoad = -1;
+  int selected = -1;
   for (int i = 0; i < NUM_ROADS; i++) {
     if (vehicleCounts[i] > maxCount) {
       maxCount = vehicleCounts[i];
-      selectedRoad = i;
+      selected = i;
     }
   }
 
-  if (selectedRoad != -1) {
-    Serial.print("[PRIORITY] Road selected by vehicle count: ");
-    Serial.println(selectedRoad + 1);
+  if (selected != -1) {
+    Serial.print("[PRIORITY] Selected Road ");
+    Serial.println(selected + 1);
   }
 
-  return selectedRoad;
+  return selected;
 }
 
 void startGreenLight(int road) {
@@ -190,33 +191,33 @@ void startGreenLight(int road) {
   dynamicDelay = constrain(dynamicDelay, MIN_GREEN_DELAY, MAX_GREEN_DELAY);
   greenEndTime = millis() + dynamicDelay;
 
-  String msg = "Green light for Road " + String(road + 1) + 
+  String msg = "Green light for Road " + String(road + 1) +
                " for " + String(dynamicDelay) + "ms";
   sendJsonMessage(msg);
-  Serial.print("[LIGHT] Green ON for Road ");
-  Serial.print(road + 1);
-  Serial.print(", duration: ");
-  Serial.print(dynamicDelay);
-  Serial.println("ms");
+  Serial.println("[LIGHT] Starting green phase");
 
-  allRedLights();                        // Turn off all lights
-  digitalWrite(redLEDs[road], LOW);     // Turn off red before green
-  digitalWrite(yellowLEDs[road], HIGH); // Yellow warning
+  allRedLights();
+  digitalWrite(redLEDs[road], LOW);
+  digitalWrite(yellowLEDs[road], HIGH);
   delay(YELLOW_DELAY);
   digitalWrite(yellowLEDs[road], LOW);
-  digitalWrite(greenLEDs[road], HIGH);  // Green ON
+  digitalWrite(greenLEDs[road], HIGH);
+
+  Serial.print("[LIGHT] Green ON -> Road ");
+  Serial.println(road + 1);
 }
 
 void endGreenLight(int road) {
-  digitalWrite(greenLEDs[road], LOW);     // Turn off green
-  digitalWrite(yellowLEDs[road], HIGH);   // Yellow before red
+  digitalWrite(greenLEDs[road], LOW);
+  digitalWrite(yellowLEDs[road], HIGH);
   delay(YELLOW_DELAY);
   digitalWrite(yellowLEDs[road], LOW);
-  digitalWrite(redLEDs[road], HIGH);      // Red ON
-  Serial.print("[LIGHT] Green OFF for Road ");
+  digitalWrite(redLEDs[road], HIGH);
+
+  Serial.print("[LIGHT] Green OFF -> Road ");
   Serial.println(road + 1);
 
-  vehicleCounts[road] = 0;                // Reset road data
+  vehicleCounts[road] = 0;
   emergencyStatus[road] = false;
 }
 
@@ -227,4 +228,3 @@ void allRedLights() {
     digitalWrite(redLEDs[i], HIGH);
   }
 }
-

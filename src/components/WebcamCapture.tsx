@@ -13,7 +13,10 @@ interface Detection {
   y: number;
   width: number;
   height: number;
+  originalWidth?: number;
+  originalHeight?: number;
 }
+
 
 interface WebcamCaptureProps {
   globalDetectionActive: boolean;
@@ -164,7 +167,7 @@ export const WebcamCapture = ({
       setError("");
 
       // Increase detection interval to 2000ms (2 seconds) for stability
-      const interval = setInterval(performDetection, 2000);
+      const interval = setInterval(performDetection, 1000);
       setDetectionInterval(interval);
     } catch (err) {
       setError("Failed to access webcam. Please ensure camera permissions are granted and the selected camera is available.");

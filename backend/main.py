@@ -25,7 +25,7 @@ app.add_middleware(
 
 # Roboflow configuration
 ROBOFLOW_API_KEY = "ExruF1SjptGtjyzU1rAc"
-MODEL_ENDPOINT = "idp-qwteg/1"
+MODEL_ENDPOINT = "idp-qwteg/2"
 ROBOFLOW_URL = f"https://detect.roboflow.com/{MODEL_ENDPOINT}"
 
 
