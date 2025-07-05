@@ -49,13 +49,14 @@ export const WebcamCapture = ({
   const [selectedCameraId, setSelectedCameraId] = useState<string>(propDeviceId);
   const [useWebSocket, setUseWebSocket] = useState(true);
 
-  // WebSocket detection hook
+  // WebSocket detection hook with force reconnect
   const {
     isConnected: wsConnected,
     connectionError: wsError,
     processingTime: wsProcessingTime,
     recentDetections: wsDetections,
-    sendFrame
+    sendFrame,
+    forceReconnect: wsForceReconnect
   } = useWebSocketDetection({
     cameraId,
     enabled: useWebSocket && globalDetectionActive && isStreaming,
@@ -202,7 +203,10 @@ export const WebcamCapture = ({
   };
 
   const performWebSocketDetection = useCallback(() => {
-    if (!videoRef.current || !canvasRef.current || !wsConnected) return;
+    if (!videoRef.current || !canvasRef.current || !wsConnected) {
+      console.log(`[Detection] Skipping frame - Video: ${!!videoRef.current}, Canvas: ${!!canvasRef.current}, WebSocket: ${wsConnected}`);
+      return;
+    }
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
@@ -213,7 +217,7 @@ export const WebcamCapture = ({
     canvas.height = video.videoHeight;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    const imageData = canvas.toDataURL('image/jpeg', 0.8);
+    const imageData = canvas.toDataURL('image/jpeg', 0.7);
     sendFrame(imageData, canvas.width, canvas.height);
   }, [wsConnected, sendFrame]);
 
@@ -386,6 +390,17 @@ export const WebcamCapture = ({
               <Zap className="h-3 w-3 mr-1" />
               {useWebSocket ? 'WebSocket ON' : 'WebSocket OFF'}
             </Button>
+            {!wsConnected && useWebSocket && (
+              <Button 
+                onClick={wsForceReconnect}
+                size="sm" 
+                variant="outline"
+                className="ml-1"
+              >
+                <RefreshCw className="h-3 w-3 mr-1" />
+                Reconnect
+              </Button>
+            )}
           </div>
         </AlertDescription>
       </Alert>
@@ -514,6 +529,12 @@ export const WebcamCapture = ({
         {isReconnecting && (
           <div className="absolute top-2 right-2 bg-yellow-600 text-white px-2 py-1 rounded text-sm">
             Reconnecting to backend...
+          </div>
+        )}
+        {!wsConnected && useWebSocket && isStreaming && (
+          <div className="absolute top-2 left-2 bg-red-600 text-white px-2 py-1 rounded text-sm flex items-center gap-1">
+            <WifiOff className="h-3 w-3" />
+            WebSocket Disconnected
           </div>
         )}
       </div>
