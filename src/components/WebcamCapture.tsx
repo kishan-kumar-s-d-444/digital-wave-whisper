@@ -3,8 +3,9 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertTriangle, Camera, Settings, Wifi, WifiOff, Play, Square, RefreshCw } from "lucide-react";
+import { AlertTriangle, Camera, Settings, Wifi, WifiOff, Play, Square, RefreshCw, Zap } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useWebSocketDetection } from "@/hooks/useWebSocketDetection";
 
 interface Detection {
   class: string;
@@ -25,8 +26,6 @@ interface WebcamCaptureProps {
   deviceId?: string;
 }
 
-const API_BASE_URL = "http://localhost:8000";
-
 export const WebcamCapture = ({ 
   globalDetectionActive, 
   onDetectionUpdate, 
@@ -40,20 +39,30 @@ export const WebcamCapture = ({
   const [error, setError] = useState<string>("");
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [detectionInterval, setDetectionInterval] = useState<NodeJS.Timeout | null>(null);
-  const [apiConnected, setApiConnected] = useState(false);
-  const [isCheckingApi, setIsCheckingApi] = useState(false);
-  const [connectionAttempts, setConnectionAttempts] = useState(0);
-  const [isReconnecting, setIsReconnecting] = useState(false);
 
   const [confidenceThreshold, setConfidenceThreshold] = useState(0.5);
   const [overlapThreshold, setOverlapThreshold] = useState(0.5);
   const [opacityThreshold, setOpacityThreshold] = useState(0.75);
   const [labelDisplayMode, setLabelDisplayMode] = useState("Draw Confidence");
-  const [processingTime, setProcessingTime] = useState<number>(0);
 
-  const [recentDetections, setRecentDetections] = useState<{ detection: Detection; timestamp: number }[]>([]);
   const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<string>(propDeviceId);
+  const [useWebSocket, setUseWebSocket] = useState(true);
+
+  // WebSocket detection hook
+  const {
+    isConnected: wsConnected,
+    connectionError: wsError,
+    processingTime: wsProcessingTime,
+    recentDetections: wsDetections,
+    sendFrame
+  } = useWebSocketDetection({
+    cameraId,
+    enabled: useWebSocket && globalDetectionActive && isStreaming,
+    onDetectionUpdate,
+    confidenceThreshold,
+    overlapThreshold
+  });
 
   // Sync prop changes to state
   useEffect(() => {
@@ -72,6 +81,11 @@ export const WebcamCapture = ({
   }, [globalDetectionActive]);
 
   // Auto-reconnection logic
+  const [apiConnected, setApiConnected] = useState(false);
+  const [isCheckingApi, setIsCheckingApi] = useState(false);
+  const [connectionAttempts, setConnectionAttempts] = useState(0);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+
   useEffect(() => {
     let reconnectTimeout: NodeJS.Timeout;
     
@@ -136,7 +150,7 @@ export const WebcamCapture = ({
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
       
-      const response = await fetch(`${API_BASE_URL}/health`, {
+      const response = await fetch(`http://localhost:8000/health`, {
         method: 'GET',
         signal: controller.signal,
         headers: {
@@ -187,12 +201,23 @@ export const WebcamCapture = ({
     checkApiConnection();
   };
 
-  const startWebcam = async () => {
-    if (!apiConnected) {
-      setError("Please ensure the backend API is running before starting detection");
-      return;
-    }
+  const performWebSocketDetection = useCallback(() => {
+    if (!videoRef.current || !canvasRef.current || !wsConnected) return;
 
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const video = videoRef.current;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const imageData = canvas.toDataURL('image/jpeg', 0.8);
+    sendFrame(imageData, canvas.width, canvas.height);
+  }, [wsConnected, sendFrame]);
+
+  const startWebcam = async () => {
     if (!selectedCameraId) {
       setError("Please select a camera first");
       return;
@@ -220,9 +245,11 @@ export const WebcamCapture = ({
       onStatusChange(true);
       setError("");
 
-      // Start detection with longer interval for stability
-      const interval = setInterval(performDetection, 2000);
-      setDetectionInterval(interval);
+      // Start WebSocket detection with faster interval
+      if (useWebSocket) {
+        const interval = setInterval(performWebSocketDetection, 1000); // 1 second for WebSocket
+        setDetectionInterval(interval);
+      }
     } catch (err) {
       setError("Failed to access webcam. Please ensure camera permissions are granted and the selected camera is available.");
       console.error("Webcam error:", err);
@@ -242,7 +269,6 @@ export const WebcamCapture = ({
 
     setIsStreaming(false);
     onStatusChange(false);
-    setRecentDetections([]);
   };
 
   const handleCameraChange = (deviceId: string) => {
@@ -255,113 +281,6 @@ export const WebcamCapture = ({
           startWebcam();
         }
       }, 100);
-    }
-  };
-
-  const performDetection = async () => {
-    if (!videoRef.current || !canvasRef.current) return;
-
-    // Check API connection before attempting detection
-    if (!apiConnected) {
-      console.log("API not connected, skipping detection");
-      if (!isCheckingApi && !isReconnecting) {
-        console.log("Attempting to reconnect to API...");
-        checkApiConnection();
-      }
-      return;
-    }
-
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const video = videoRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    const imageData = canvas.toDataURL('image/jpeg', 0.8);
-    const originalWidth = canvas.width;
-    const originalHeight = canvas.height;
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout for detection
-
-      const response = await fetch(`${API_BASE_URL}/detect_frame`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          image: imageData,
-          confidence_threshold: confidenceThreshold,
-          overlap_threshold: overlapThreshold,
-          original_width: originalWidth,
-          original_height: originalHeight,
-          road_id: cameraId
-        }),
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! Status: ${response.status}`);
-      }
-
-      const result = await response.json();
-      const now = Date.now();
-
-      if (result.success && result.predictions) {
-        console.log(`Detection successful for camera ${cameraId}:`, result.predictions.length, 'vehicles found');
-        const updatedDetections = [...recentDetections];
-
-        const origW = result.original_width || originalWidth;
-        const origH = result.original_height || originalHeight;
-
-        result.predictions.forEach((pred: Detection) => {
-          const detectionWithSize = { ...pred, originalWidth: origW, originalHeight: origH };
-          const existing = updatedDetections.find(
-            (item) =>
-              item.detection.class === pred.class &&
-              Math.abs(item.detection.x - pred.x) < 10 &&
-              Math.abs(item.detection.y - pred.y) < 10
-          );
-
-          if (existing) {
-            existing.detection = detectionWithSize;
-            existing.timestamp = now;
-          } else {
-            updatedDetections.push({ detection: detectionWithSize, timestamp: now });
-          }
-        });
-
-        const filtered = updatedDetections.filter(item => now - item.timestamp <= 10000);
-        setRecentDetections(filtered);
-        onDetectionUpdate(filtered.map(d => d.detection));
-        setProcessingTime(result.processing_time || 0);
-        
-        // Reset connection attempts on successful detection
-        if (connectionAttempts > 0) {
-          setConnectionAttempts(0);
-        }
-      } else {
-        console.warn("Detection failed:", result.error);
-      }
-    } catch (err) {
-      console.error("Detection error:", err);
-      
-      if (err instanceof Error) {
-        if (err.name === 'AbortError') {
-          console.log("Detection request timed out");
-          setError("Detection request timed out. Backend may be overloaded.");
-        } else if (err.message.includes('NetworkError') || err.message.includes('Failed to fetch')) {
-          console.log("Network error during detection, marking API as disconnected");
-          setApiConnected(false);
-          setError("Lost connection to backend during detection");
-        }
-      }
     }
   };
 
@@ -422,7 +341,6 @@ export const WebcamCapture = ({
     const renderLoop = () => {
       const ctx = canvasRef.current?.getContext('2d');
       const video = videoRef.current;
-      const now = Date.now();
 
       if (ctx && video && video.videoWidth > 0 && video.videoHeight > 0) {
         const canvas = canvasRef.current!;
@@ -432,8 +350,9 @@ export const WebcamCapture = ({
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-        const filtered = recentDetections.filter(d => now - d.timestamp <= 10000);
-        drawDetections(ctx, filtered.map(d => d.detection), canvas.width, canvas.height);
+        if (useWebSocket) {
+          drawDetections(ctx, wsDetections, canvas.width, canvas.height);
+        }
       }
 
       animationFrameId = requestAnimationFrame(renderLoop);
@@ -441,7 +360,7 @@ export const WebcamCapture = ({
 
     animationFrameId = requestAnimationFrame(renderLoop);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [recentDetections, drawDetections]);
+  }, [wsDetections, drawDetections, useWebSocket]);
 
   useEffect(() => {
     checkApiConnection();
@@ -450,26 +369,24 @@ export const WebcamCapture = ({
 
   return (
     <div className="space-y-4">
-      <Alert className={`${apiConnected ? 'bg-green-900/50 border-green-500' : 'bg-red-900/50 border-red-500'}`}>
-        {apiConnected ? <Wifi className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
+      <Alert className={`${wsConnected ? 'bg-green-900/50 border-green-500' : 'bg-red-900/50 border-red-500'}`}>
+        {wsConnected ? <Zap className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
         <AlertDescription className="text-white flex items-center justify-between">
           <span>
-            Backend API: {apiConnected ? 'Connected' : 'Disconnected'}
-            {isReconnecting && ' - Reconnecting...'}
-            {connectionAttempts > 0 && ` (Attempt ${connectionAttempts}/10)`}
+            WebSocket: {wsConnected ? 'Connected (Real-time)' : 'Disconnected'}
+            {wsError && ` - ${wsError}`}
           </span>
-          {!apiConnected && (
+          <div className="flex items-center gap-2">
             <Button 
-              onClick={forceReconnect} 
+              onClick={() => setUseWebSocket(prev => !prev)} 
               size="sm" 
-              variant="outline"
-              disabled={isCheckingApi}
+              variant={useWebSocket ? "default" : "outline"}
               className="ml-2"
             >
-              <RefreshCw className={`h-3 w-3 mr-1 ${isCheckingApi ? 'animate-spin' : ''}`} />
-              Retry
+              <Zap className="h-3 w-3 mr-1" />
+              {useWebSocket ? 'WebSocket ON' : 'WebSocket OFF'}
             </Button>
-          )}
+          </div>
         </AlertDescription>
       </Alert>
 
@@ -575,9 +492,9 @@ export const WebcamCapture = ({
               </SelectContent>
             </Select>
           </div>
-          {processingTime > 0 && (
-            <div className="text-purple-200 text-sm">
-              Processing Time: {(processingTime * 1000).toFixed(1)}ms
+          {wsProcessingTime > 0 && (
+            <div className="text-green-200 text-sm">
+              WebSocket Processing Time: {(wsProcessingTime * 1000).toFixed(1)}ms
             </div>
           )}
         </CardContent>
@@ -606,7 +523,7 @@ export const WebcamCapture = ({
           <Button 
             onClick={startWebcam} 
             className="bg-green-600 hover:bg-green-700" 
-            disabled={!apiConnected || !selectedCameraId}
+            disabled={!selectedCameraId}
           >
             <Play className="h-4 w-4 mr-2" />
             Start Detection

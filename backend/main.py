@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -10,6 +10,7 @@ import asyncio
 import logging
 import random
 from arduino_controller import arduino_controller, initialize_arduino, send_traffic_data
+from websocket_handler import manager, handle_websocket_detection
 
 app = FastAPI(title="Vehicle Detection API with Arduino Integration")
 
@@ -21,7 +22,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # Roboflow configuration
 ROBOFLOW_API_KEY = "ExruF1SjptGtjyzU1rAc"
@@ -98,6 +98,17 @@ class TrafficDataRequest(BaseModel):
     road_data: List[Dict]
 
 
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    await manager.connect(websocket, client_id)
+    try:
+        await handle_websocket_detection(websocket, client_id)
+    except WebSocketDisconnect:
+        manager.disconnect(client_id)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        manager.disconnect(client_id)
+
 
 @app.post("/detect", response_model=DetectionResponse)
 async def detect_objects(
@@ -158,7 +169,6 @@ async def detect_objects(
             total_detections=0,
             processing_time=0.0
         )
-
 
 
 @app.post("/detect_frame")
@@ -266,6 +276,7 @@ async def detect_frame(frame_data: dict):
         logging.error(f"Detection failed: {e}")
         return {"success": False, "predictions": [], "error": str(e)}
 
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint that indicates backend readiness"""
@@ -277,6 +288,7 @@ async def health_check():
         "startup_complete": startup_complete,
         "timestamp": time.time()
     }
+
 
 @app.post("/arduino/connect")
 async def connect_arduino(request: ArduinoConnectionRequest):
@@ -301,6 +313,7 @@ async def connect_arduino(request: ArduinoConnectionRequest):
         print(f"❌ Arduino connection error: {e}")
         return {"success": False, "message": f"Connection error: {str(e)}"}
 
+
 @app.post("/arduino/disconnect")
 async def disconnect_arduino():
     """Disconnect from Arduino controller"""
@@ -312,6 +325,7 @@ async def disconnect_arduino():
     except Exception as e:
         print(f"❌ Arduino disconnection error: {e}")
         return {"success": False, "message": f"Disconnection error: {str(e)}"}
+
 
 @app.post("/arduino/start")
 async def start_traffic_system():
@@ -332,6 +346,7 @@ async def start_traffic_system():
         print(f"❌ Start system error: {e}")
         return {"success": False, "message": f"Start error: {str(e)}"}
 
+
 @app.post("/arduino/stop")
 async def stop_traffic_system():
     """Stop the Arduino traffic control system"""
@@ -350,6 +365,7 @@ async def stop_traffic_system():
     except Exception as e:
         print(f"❌ Stop system error: {e}")
         return {"success": False, "message": f"Stop error: {str(e)}"}
+
 
 @app.post("/arduino/update_traffic")
 async def update_traffic_data(request: TrafficDataRequest):
@@ -370,6 +386,7 @@ async def update_traffic_data(request: TrafficDataRequest):
     except Exception as e:
         print(f"❌ Traffic data error: {e}")
         return {"success": False, "message": f"Traffic data error: {str(e)}"}
+
 
 @app.get("/arduino/status")
 async def get_arduino_status():
@@ -401,6 +418,7 @@ async def get_arduino_status():
             "message": f"Status error: {str(e)}"
         }
 
+
 @app.get("/")
 async def root():
     return {
@@ -408,6 +426,7 @@ async def root():
         "status": "running",
         "arduino_connected": arduino_controller.connected
     }
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -417,6 +436,7 @@ async def startup_event():
     print("🚀 STARTING VEHICLE DETECTION & TRAFFIC CONTROL SYSTEM")
     print("="*60)
     print("⏳ Initializing backend services...")
+    print("🔌 WebSocket support enabled for real-time detection")
     
     # Give system time to fully initialize
     await asyncio.sleep(1)
@@ -424,6 +444,7 @@ async def startup_event():
     print("✅ Backend services ready!")
     print("🔌 Arduino connection available via web interface")
     print("🌐 Web interface can now connect to this backend")
+    print("🚀 WebSocket endpoint: ws://localhost:8000/ws/{client_id}")
     print("="*60)
     print("🎯 BACKEND READY FOR CONNECTIONS")
     print("="*60 + "\n")
